@@ -1,0 +1,31 @@
+# 编译产物
+git-agent
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试覆盖率
+cover.out
+coverage.html
+
+# Go 工具链生成文件
+vendor/
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 环境配置（可能含密钥）
+.env
+.env.local
+.env.*.local
+
+# 调试文件
+debug
+__debug_bin*
