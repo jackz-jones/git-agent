@@ -201,7 +201,7 @@ graph TB
 
     subgraph exec[工具执行层]
         GT[GitTool<br/>implements tools.Tool<br/>Name / Description / Call]
-        EXEC[工具执行器闭包<br/>func(ctx, params) → (string, error)]
+        EXEC["工具执行器闭包<br/>func(ctx, params) -&gt; (string, error)"]
     end
 
     GAT -->|17 个工具定义| GTR

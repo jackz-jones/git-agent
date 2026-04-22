@@ -201,7 +201,7 @@ graph TB
 
     subgraph exec[Tool Execution Layer]
         GT[GitTool<br/>implements tools.Tool<br/>Name / Description / Call]
-        EXEC[Tool Executor Closure<br/>func(ctx, params) → (string, error)]
+        EXEC["Tool Executor Closure<br/>func(ctx, params) -&gt; (string, error)"]
     end
 
     GAT -->|17 tool definitions| GTR
