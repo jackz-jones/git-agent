@@ -277,9 +277,9 @@ func (d *Detector) resolveWithTheirs(content string) string {
 	return d.resolveConflict(content, "theirs")
 }
 
-// resolveWithMerge 尝试自动合并
+// resolveWithMerge 尝试自动合并：保留双方的非冲突修改，交替拼接
 func (d *Detector) resolveWithMerge(content string) string {
-	return d.resolveConflict(content, "ours") // 简化实现：默认采用 ours，后续可增强
+	return d.resolveConflict(content, "merge")
 }
 
 // resolveConflict 通用冲突解决
@@ -339,6 +339,9 @@ func (d *Detector) resolveConflict(content, strategy string) string {
 			if !strings.HasSuffix(chosen, "\n") && strings.HasSuffix(ourPart, "\n") {
 				chosen += "\n"
 			}
+		case "merge":
+			// 合并策略：先保留我们的修改，再追加对方的修改（去除重复行）
+			chosen = mergeConflictParts(ourPart, theirPart)
 		default:
 			chosen = ourPart
 		}
@@ -361,6 +364,36 @@ func (d *Detector) resolveConflict(content, strategy string) string {
 	}
 
 	return result.String()
+}
+
+// mergeConflictParts 合并双方修改内容，去除重复行
+func mergeConflictParts(ourPart, theirPart string) string {
+	ourLines := strings.Split(ourPart, "\n")
+	theirLines := strings.Split(theirPart, "\n")
+
+	// 用 map 记录我们的行，用于去重
+	ourLineSet := make(map[string]bool, len(ourLines))
+	for _, line := range ourLines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			ourLineSet[trimmed] = true
+		}
+	}
+
+	var sb strings.Builder
+	// 先写我们的修改
+	sb.WriteString(ourPart)
+
+	// 再追加对方修改中不重复的部分
+	for _, line := range theirLines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || !ourLineSet[trimmed] {
+			sb.WriteString(line)
+			sb.WriteString("\n")
+		}
+	}
+
+	return strings.TrimSuffix(sb.String(), "\n")
 }
 
 // Description 返回冲突的友好描述

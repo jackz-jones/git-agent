@@ -8,7 +8,7 @@ import (
 )
 
 // NewLangChainLLM 基于 LangChain Go 框架创建 LLM 实例
-// 支持所有 OpenAI 兼容的 API 提供商（OpenAI、Azure、DeepSeek、通义千问等）
+// 支持所有 OpenAI 兼容的 API 提供商（OpenAI、Azure、DeepSeek、通义千问、Ollama 等）
 func NewLangChainLLM(config OpenAIConfig) (llms.Model, error) {
 	opts := []openai.Option{
 		openai.WithToken(config.APIKey),

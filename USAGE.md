@@ -98,6 +98,9 @@ go run main.go --api-key sk-your-key --base-url https://api.deepseek.com/v1 --mo
 
 # Using Azure OpenAI
 go run main.go --api-key your-key --base-url https://your-name.openai.azure.com/openai/deployments/your-model --model gpt-4o
+
+# Using Local Ollama (no cloud API needed!)
+go run main.go --api-key ollama --base-url http://localhost:11434/v1 --model qwen2.5:7b
 ```
 
 > 💡 **Tip**: You can also use environment variables instead of command-line arguments, so you don't have to type them every time:
@@ -107,6 +110,45 @@ go run main.go --api-key your-key --base-url https://your-name.openai.azure.com/
 > export GIT_AGENT_MODEL=deepseek-chat
 > go run main.go
 > ```
+
+#### 🦙 Using Local Ollama (Free, No Cloud Required)
+
+If you have [Ollama](https://ollama.ai) installed locally, you can run Git Agent with a local LLM — completely free and offline!
+
+**Step 1: Install Ollama**
+
+Visit https://ollama.ai to download and install Ollama for your platform.
+
+**Step 2: Pull a model**
+
+```bash
+# Recommended: Qwen2.5 (best Function Calling support)
+ollama pull qwen2.5:7b
+
+# Alternative: Llama 3.1
+ollama pull llama3.1:8b
+```
+
+**Step 3: Start Git Agent**
+
+```bash
+go run main.go --api-key ollama --base-url http://localhost:11434/v1 --model qwen2.5:7b
+```
+
+Or using environment variables:
+
+```bash
+export GIT_AGENT_API_KEY=ollama
+export GIT_AGENT_BASE_URL=http://localhost:11434/v1
+export GIT_AGENT_MODEL=qwen2.5:7b
+go run main.go
+```
+
+> ⚠️ **Important Notes for Ollama Users**:
+> - The `--api-key` can be any non-empty string (e.g., `ollama`) — it's only used to enable LLM mode. Ollama doesn't require real authentication.
+> - **Function Calling support varies by model**: `qwen2.5` has the best support; `llama3.1` has basic support. Models without Function Calling support (e.g., `mistral`, `gemma`) may cause tool invocation failures.
+> - Make sure Ollama is running (`ollama serve`) before starting Git Agent.
+> - Local models are slower than cloud APIs — responses may take a few seconds depending on your hardware.
 
 #### Successful Startup
 
@@ -144,7 +186,7 @@ After starting, you'll see the welcome screen:
 | **Expression Flexibility** | Must use common phrases | Say it however you want |
 | **Conversation Ability** | None | Multi-turn conversations |
 | **Error Handling** | Simple prompts | Intelligent explanations and guidance |
-| **Cost** | Free | Pay per API usage |
+| **Cost** | Free | Pay per API usage (or free with local Ollama) |
 | **Recommended For** | First trial, simple operations | Daily use, complex needs |
 
 > 💡 **Suggestion**: Start with local mode to get familiar with the basics, then switch to LLM mode when you need more intelligence.
@@ -790,7 +832,38 @@ This way, when you save a version, the author will show as "Alex".
 
 ---
 
-### Q7: How do I view help?
+### Q7: How do I use a local Ollama model?
+
+**Answer**: First make sure Ollama is installed and running, then pull a model and start Git Agent:
+
+```bash
+# 1. Start Ollama service
+ollama serve
+
+# 2. Pull a model (recommended: qwen2.5 for best Function Calling support)
+ollama pull qwen2.5:7b
+
+# 3. Start Git Agent
+go run main.go --api-key ollama --base-url http://localhost:11434/v1 --model qwen2.5:7b
+```
+
+> ⚠️ The `--api-key` must be non-empty to enable LLM mode, but Ollama doesn't require a real key. Any string like `ollama` works.
+
+---
+
+### Q8: Ollama model doesn't call tools / Function Calling fails
+
+**Answer**: Not all Ollama models support Function Calling equally well. Try these steps:
+
+1. **Switch to a better-supported model** — `qwen2.5:7b` or `qwen2.5:14b` have the best support
+2. **Update Ollama** — older versions may have incomplete OpenAI compatibility: `ollama update`
+3. **Check if the model supports tools** — some models (like `mistral`, `gemma`, `phi`) have limited or no Function Calling support
+
+If Function Calling still fails, you can fall back to local mode by removing the `--api-key` flag.
+
+---
+
+### Q9: How do I view help?
 
 Type `help` in interactive mode:
 
@@ -878,9 +951,9 @@ Just tell me what you'd like to do in natural language!
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `GIT_AGENT_API_KEY` | LLM API Key | None | `sk-xxxxx` |
-| `GIT_AGENT_BASE_URL` | LLM API URL | `https://api.openai.com/v1` | `https://api.deepseek.com/v1` |
-| `GIT_AGENT_MODEL` | LLM Model Name | `gpt-4o` | `deepseek-chat` |
+| `GIT_AGENT_API_KEY` | LLM API Key | None | `sk-xxxxx`, `ollama` (for local Ollama) |
+| `GIT_AGENT_BASE_URL` | LLM API URL | `https://api.openai.com/v1` | `https://api.deepseek.com/v1`, `http://localhost:11434/v1` (Ollama) |
+| `GIT_AGENT_MODEL` | LLM Model Name | `gpt-4o` | `deepseek-chat`, `qwen2.5:7b` (Ollama) |
 | `GIT_AGENT_MAX_TOKENS` | Max Tokens | `4096` | `8192` |
 | `GIT_AGENT_USER` | Username | `default_user` | `Alex` |
 | `GIT_AGENT_EMAIL` | User Email | `user@git-agent.dev` | `alex@company.com` |

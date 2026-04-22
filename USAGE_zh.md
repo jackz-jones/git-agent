@@ -98,6 +98,9 @@ go run main.go --api-key sk-你的密钥 --base-url https://api.deepseek.com/v1 
 
 # 使用 Azure OpenAI
 go run main.go --api-key 你的密钥 --base-url https://你的名称.openai.azure.com/openai/deployments/你的模型 --model gpt-4o
+
+# 使用本地 Ollama（免费，无需云端 API！）
+go run main.go --api-key ollama --base-url http://localhost:11434/v1 --model qwen2.5:7b
 ```
 
 > 💡 **小贴士**：也可以用环境变量代替命令行参数，这样不用每次都输入：
@@ -107,6 +110,45 @@ go run main.go --api-key 你的密钥 --base-url https://你的名称.openai.azu
 > export GIT_AGENT_MODEL=deepseek-chat
 > go run main.go
 > ```
+
+#### 🦙 使用本地 Ollama（免费，无需联网）
+
+如果您本地安装了 [Ollama](https://ollama.ai)，可以用本地大模型运行 Git Agent —— 完全免费且离线可用！
+
+**第 1 步：安装 Ollama**
+
+访问 https://ollama.ai 下载并安装 Ollama。
+
+**第 2 步：拉取模型**
+
+```bash
+# 推荐：Qwen2.5（Function Calling 支持最好）
+ollama pull qwen2.5:7b
+
+# 备选：Llama 3.1
+ollama pull llama3.1:8b
+```
+
+**第 3 步：启动 Git Agent**
+
+```bash
+go run main.go --api-key ollama --base-url http://localhost:11434/v1 --model qwen2.5:7b
+```
+
+或使用环境变量：
+
+```bash
+export GIT_AGENT_API_KEY=ollama
+export GIT_AGENT_BASE_URL=http://localhost:11434/v1
+export GIT_AGENT_MODEL=qwen2.5:7b
+go run main.go
+```
+
+> ⚠️ **Ollama 使用注意事项**：
+> - `--api-key` 可以填任意非空字符串（如 `ollama`），仅用于启用 LLM 模式。Ollama 不需要真实认证。
+> - **Function Calling 支持与模型相关**：`qwen2.5` 支持最好，`llama3.1` 有基础支持。不支持 Function Calling 的模型（如 `mistral`、`gemma`）可能导致工具调用失败。
+> - 确保 Ollama 服务已运行（`ollama serve`）再启动 Git Agent。
+> - 本地模型比云端 API 慢，响应时间取决于您的硬件配置，可能需要几秒钟。
 
 #### 启动成功标志
 
@@ -144,7 +186,7 @@ go run main.go --api-key 你的密钥 --base-url https://你的名称.openai.azu
 | **说法灵活性** | 需要用常见说法 | 随便怎么说都行 |
 | **对话能力** | 无 | 可以多轮对话 |
 | **出错处理** | 提示较简单 | 智能解释和引导 |
-| **费用** | 免费 | 按 API 用量计费 |
+| **费用** | 免费 | 按 API 用量计费（本地 Ollama 免费） |
 | **推荐场景** | 先试用、简单操作 | 日常使用、复杂需求 |
 
 > 💡 **建议**：先用本地模式熟悉基本操作，等觉得不够智能了再配置 LLM 模式。
@@ -792,7 +834,38 @@ go run main.go
 
 ---
 
-### Q7：如何查看帮助？
+### Q7：如何使用本地 Ollama 模型？
+
+**答**：先确保已安装并启动 Ollama，然后拉取模型并启动 Git Agent：
+
+```bash
+# 1. 启动 Ollama 服务
+ollama serve
+
+# 2. 拉取模型（推荐 qwen2.5，Function Calling 支持最好）
+ollama pull qwen2.5:7b
+
+# 3. 启动 Git Agent
+go run main.go --api-key ollama --base-url http://localhost:11434/v1 --model qwen2.5:7b
+```
+
+> ⚠️ `--api-key` 必须填非空值才能启用 LLM 模式，但 Ollama 不需要真实密钥，填 `ollama` 即可。
+
+---
+
+### Q8：Ollama 模型不调用工具 / Function Calling 失败
+
+**答**：并非所有 Ollama 模型都同样支持 Function Calling。请尝试以下步骤：
+
+1. **换用支持更好的模型** — `qwen2.5:7b` 或 `qwen2.5:14b` 的支持最好
+2. **更新 Ollama** — 旧版本的 OpenAI 兼容性可能不完整：`ollama update`
+3. **确认模型支持工具调用** — 部分模型（如 `mistral`、`gemma`、`phi`）的 Function Calling 支持有限或完全不支持
+
+如果 Function Calling 仍然失败，可以去掉 `--api-key` 参数回退到本地模式使用。
+
+---
+
+### Q9：如何查看帮助？
 
 在交互模式中输入 `帮助` 或 `help`：
 
@@ -880,9 +953,9 @@ go run main.go
 
 | 变量名 | 说明 | 默认值 | 示例 |
 |--------|------|--------|------|
-| `GIT_AGENT_API_KEY` | LLM API 密钥 | 无 | `sk-xxxxx` |
-| `GIT_AGENT_BASE_URL` | LLM API 地址 | `https://api.openai.com/v1` | `https://api.deepseek.com/v1` |
-| `GIT_AGENT_MODEL` | LLM 模型名称 | `gpt-4o` | `deepseek-chat` |
+| `GIT_AGENT_API_KEY` | LLM API 密钥 | 无 | `sk-xxxxx`、`ollama`（本地 Ollama） |
+| `GIT_AGENT_BASE_URL` | LLM API 地址 | `https://api.openai.com/v1` | `https://api.deepseek.com/v1`、`http://localhost:11434/v1`（Ollama） |
+| `GIT_AGENT_MODEL` | LLM 模型名称 | `gpt-4o` | `deepseek-chat`、`qwen2.5:7b`（Ollama） |
 | `GIT_AGENT_MAX_TOKENS` | 最大 Token 数 | `4096` | `8192` |
 | `GIT_AGENT_USER` | 用户名 | `default_user` | `张三` |
 | `GIT_AGENT_EMAIL` | 用户邮箱 | `user@git-agent.dev` | `zhangsan@company.com` |

@@ -16,6 +16,7 @@ import (
 	"github.com/jackz-jones/git-agent/internal/planner"
 	"github.com/jackz-jones/git-agent/internal/repository"
 	"github.com/tmc/langchaingo/llms"
+	"github.com/tmc/langchaingo/llms/openai"
 )
 
 // AgentState 表示 Agent 的当前状态
@@ -81,6 +82,7 @@ type Agent struct {
 	langchainLLM llms.Model            // LangChain LLM 实例
 	chatHistory  []llms.MessageContent // 对话上下文（LangChain MessageContent）
 	toolDefs     []llms.Tool           // LangChain 工具定义（用于 function calling）
+	currentTools []llms.Tool           // 当前对话轮次使用的工具子集（智能筛选后）
 	toolRegistry *llm.GitToolRegistry  // 工具注册中心
 
 	// 事件通道
@@ -165,6 +167,9 @@ func NewWithLLM(repoPath string, userConfig *UserConfig, llmConfig *LLMConfig) (
 
 	// 构建工具定义
 	a.toolDefs = a.toolRegistry.BuildToolDefinitions()
+	if len(a.toolDefs) == 0 {
+		return nil, fmt.Errorf("没有注册任何工具定义，LLM 模式需要至少一个工具")
+	}
 
 	// 初始化对话上下文，加入系统提示词
 	a.chatHistory = append(a.chatHistory,
@@ -192,7 +197,8 @@ func (a *Agent) registerToolExecutors() {
 	a.toolRegistry.Register("view_history", func(ctx context.Context, params map[string]interface{}) (string, error) {
 		limit := toInt(params["limit"], 10)
 		author := toString(params["author"], "")
-		result, err := a.gitWrapper.Log(limit, author)
+		file := toString(params["file"], "")
+		result, err := a.gitWrapper.GetHistory(file, limit, author)
 		return toJSONResult(result, err)
 	})
 
@@ -240,6 +246,9 @@ func (a *Agent) registerToolExecutors() {
 
 	// view_team_change
 	a.toolRegistry.Register("view_team_change", func(ctx context.Context, params map[string]interface{}) (string, error) {
+		// 先拉取远程最新内容（与本地模式 planViewTeamChange 行为一致）
+		remote := "origin"
+		_ = a.gitWrapper.Pull(remote) // 拉取失败不影响查看本地历史
 		limit := toInt(params["limit"], 10)
 		author := toString(params["author"], "")
 		result, err := a.gitWrapper.Log(limit, author)
@@ -315,6 +324,79 @@ func (a *Agent) registerToolExecutors() {
 	})
 }
 
+// intentToolMapping 意图到工具名称的映射
+// 用于智能筛选发送给 LLM 的工具，避免小模型被过多工具干扰
+var intentToolMapping = map[string][]string{
+	"save_version":    {"save_version", "view_status", "view_diff"},
+	"view_history":    {"view_history", "view_status"},
+	"restore_version": {"restore_version", "view_history", "view_diff"},
+	"view_diff":       {"view_diff", "view_status"},
+	"view_status":     {"view_status", "view_diff", "view_history"},
+	"submit_change":   {"submit_change", "view_status", "push_to_remote"},
+	"view_team_change": {"view_team_change", "view_history", "view_diff"},
+	"approve_merge":   {"merge_branch", "view_status", "view_diff"},
+	"init_repo":       {"init_repo"},
+	"create_branch":   {"create_branch", "switch_branch", "list_branches"},
+	"switch_branch":   {"switch_branch", "list_branches", "create_branch"},
+	"list_branches":   {"list_branches", "switch_branch"},
+	"create_tag":      {"create_tag", "view_history"},
+	"push":            {"push_to_remote", "view_status"},
+	"pull":            {"pull_from_remote", "view_status", "detect_conflict"},
+	"detect_conflict": {"detect_conflict", "resolve_conflict", "view_status"},
+	"help":            {"view_status", "view_history"},
+}
+
+// selectRelevantTools 根据用户输入智能筛选相关工具
+// 先用本地 interpreter 预判意图，再只发送相关工具给 LLM
+// 对于小模型（如 7B），工具太多会导致模型不调用任何工具
+func (a *Agent) selectRelevantTools(input string) []llms.Tool {
+	// 用本地 interpreter 预判意图
+	intent, err := a.interpreter.Parse(input)
+	if err != nil || intent == nil {
+		// 解析失败，发送所有工具
+		return a.toolDefs
+	}
+	
+	// 获取与意图相关的工具名称
+	relevantNames := intentToolMapping[string(intent.Type)]
+	if len(relevantNames) == 0 {
+		// 未知意图，发送所有工具
+		return a.toolDefs
+	}
+	
+	// 始终包含 view_status（最常用的辅助工具）
+	hasViewStatus := false
+	for _, name := range relevantNames {
+		if name == "view_status" {
+			hasViewStatus = true
+			break
+		}
+	}
+	if !hasViewStatus && intent.Type != "init_repo" {
+		relevantNames = append(relevantNames, "view_status")
+	}
+	
+	// 根据名称筛选工具
+	nameSet := make(map[string]bool, len(relevantNames))
+	for _, name := range relevantNames {
+		nameSet[name] = true
+	}
+	
+	var result []llms.Tool
+	for _, tool := range a.toolDefs {
+		if nameSet[tool.Function.Name] {
+			result = append(result, tool)
+		}
+	}
+	
+	// 如果筛选结果为空，回退到全量工具
+	if len(result) == 0 {
+		return a.toolDefs
+	}
+	
+	return result
+}
+
 // IsLLMEnabled 检查 LLM 是否已启用
 func (a *Agent) IsLLMEnabled() bool {
 	return a.langchainLLM != nil && a.llmConfig.Enabled
@@ -340,12 +422,19 @@ func (a *Agent) processWithLLM(ctx context.Context, input string) *AgentResponse
 		llms.TextParts(llms.ChatMessageTypeHuman, input),
 	)
 
-	// 调用 LLM，携带工具定义（function calling）
+	// 智能工具筛选：先用本地 interpreter 预判意图，只发送相关工具给 LLM
+	// 这对于小模型（如 7B）特别重要，工具太多会导致模型不调用任何工具
+	a.currentTools = a.selectRelevantTools(input)
+
+	// 调用 LLM，携带筛选后的工具定义（function calling）
 	resp, err := a.langchainLLM.GenerateContent(
 		ctx,
 		a.chatHistory,
-		llms.WithTools(a.toolDefs),
-		llms.WithTemperature(0.1), // Agent 场景使用低温度，减少幻觉
+		llms.WithTools(a.currentTools),
+		llms.WithToolChoice("auto"), // 显式指定 auto，确保 Ollama 等兼容 API 启用工具调用
+		llms.WithTemperature(0.1),   // Agent 场景使用低温度，减少幻觉
+		llms.WithMaxTokens(a.llmConfig.MaxTokens),
+		openai.WithLegacyMaxTokensField(), // 兼容 Ollama、DeepSeek 等非 OpenAI API
 	)
 	if err != nil {
 		// LLM 调用失败，回退到本地模式
@@ -373,6 +462,30 @@ func (a *Agent) handleLLMResponse(ctx context.Context, resp *llms.ContentRespons
 
 	choice := resp.Choices[0]
 	var totalUsage llm.Usage
+
+	// 从 LLM 响应的 GenerationInfo 中提取 Token 用量
+	// langchaingo 将 usage 信息放在 ContentChoice.GenerationInfo 中
+	if choice.GenerationInfo != nil {
+		if v, ok := choice.GenerationInfo["PromptTokens"]; ok {
+			if n, ok := v.(int); ok {
+				totalUsage.PromptTokens = n
+			}
+		}
+		if v, ok := choice.GenerationInfo["CompletionTokens"]; ok {
+			if n, ok := v.(int); ok {
+				totalUsage.CompletionTokens = n
+			}
+		}
+		if v, ok := choice.GenerationInfo["TotalTokens"]; ok {
+			if n, ok := v.(int); ok {
+				totalUsage.TotalTokens = n
+			}
+		}
+		// 如果 TotalTokens 为 0，自动计算
+		if totalUsage.TotalTokens == 0 && (totalUsage.PromptTokens > 0 || totalUsage.CompletionTokens > 0) {
+			totalUsage.TotalTokens = totalUsage.PromptTokens + totalUsage.CompletionTokens
+		}
+	}
 
 	// 从 ContentChoice 中获取文本内容和工具调用
 	assistantContent := choice.Content
@@ -465,8 +578,11 @@ func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.T
 	resp, err := a.langchainLLM.GenerateContent(
 		ctx,
 		a.chatHistory,
-		llms.WithTools(a.toolDefs),
+		llms.WithTools(a.currentTools), // 使用当前轮次筛选后的工具
+		llms.WithToolChoice("auto"), // 显式指定 auto，确保 Ollama 等兼容 API 启用工具调用
 		llms.WithTemperature(0.1),
+		llms.WithMaxTokens(a.llmConfig.MaxTokens),
+		openai.WithLegacyMaxTokensField(), // 兼容 Ollama、DeepSeek 等非 OpenAI API
 	)
 	if err != nil {
 		a.setState(StateIdle)
@@ -651,7 +767,8 @@ func (a *Agent) executeStep(step *planner.Step) (interface{}, error) {
 			fmt.Sscanf(l, "%d", &limit)
 		}
 		author := step.Params["author"]
-		return a.gitWrapper.Log(limit, author)
+		filePath := step.Params["file"]
+		return a.gitWrapper.GetHistory(filePath, limit, author)
 
 	case planner.StepGitDiff:
 		filePath := step.Params["file"]

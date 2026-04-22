@@ -92,12 +92,16 @@ func (r *GitToolRegistry) BuildTools() []tools.Tool {
 }
 
 // BuildToolDefinitions 构建 LangChain llms.Tool 定义列表（用于 function calling）
+// 同时将 GitTool 实例存入 r.tools，以便 GetTool 能找到对应工具执行器
 func (r *GitToolRegistry) BuildToolDefinitions() []llms.Tool {
 	var result []llms.Tool
 	for _, toolDef := range AllGitAgentTools {
-		if _, ok := r.executors[toolDef.Name]; !ok {
+		executor, ok := r.executors[toolDef.Name]
+		if !ok {
 			continue
 		}
+		// 同时创建 GitTool 实例并存入 tools map，确保 GetTool 能找到
+		r.tools[toolDef.Name] = NewGitTool(toolDef, executor)
 		result = append(result, llms.Tool{
 			Type: "function",
 			Function: &llms.FunctionDefinition{
