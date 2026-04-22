@@ -434,6 +434,12 @@ func (p *Planner) planPush(intent *interpreter.UserIntent) []*Step {
 
 	return []*Step{
 		{
+			Type:     StepGitStatus,
+			Params:   map[string]string{},
+			Required: false,
+			Desc:     "检查当前仓库状态和同步情况",
+		},
+		{
 			Type: StepGitPush,
 			Params: map[string]string{
 				"remote": remote,

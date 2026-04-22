@@ -339,6 +339,17 @@ func (a *Agent) registerToolExecutors() {
 		password := toString(params["password"], "")
 		remoteURL := toString(params["remote_url"], "")
 
+		// 先检查 ahead/behind 状态
+		aheadBehind, _ := a.gitWrapper.GetAheadBehind()
+		if aheadBehind != nil {
+			if aheadBehind.Ahead == 0 && aheadBehind.Behind == 0 {
+				return toJSONResult(map[string]string{
+					"status":  "up_to_date",
+					"message": "本地和远程已完全同步，无需推送",
+				}, nil)
+			}
+		}
+
 		// 如果提供了新的远程 URL（通常是 HTTPS 地址），先切换远程地址
 		if remoteURL != "" {
 			if err := a.gitWrapper.SetRemoteURL(remote, remoteURL); err != nil {
@@ -897,6 +908,19 @@ func (a *Agent) executeStep(step *planner.Step) (interface{}, error) {
 		if remote == "" {
 			remote = "origin"
 		}
+
+		// 检查 ahead/behind 状态
+		aheadBehind, _ := a.gitWrapper.GetAheadBehind()
+		if aheadBehind != nil && aheadBehind.Ahead == 0 && aheadBehind.Behind == 0 {
+			return map[string]string{
+				"status":  "up_to_date",
+				"message": "本地和远程已完全同步，无需推送",
+			}, nil
+		}
+		if aheadBehind != nil && aheadBehind.Ahead > 0 {
+			// 有领先提交，执行推送
+		}
+
 		err := a.gitWrapper.Push(remote)
 		if err != nil {
 			// 对 AuthError 不直接返回，包装为友好错误
@@ -1089,6 +1113,31 @@ func (a *Agent) UpdateUserInfo(name, email string) {
 		a.userConfig.Name = name
 	}
 	if email != "" {
+		a.userConfig.Email = email
+	}
+	// 持久化用户信息到 .git/config
+	if a.gitWrapper != nil {
+		_ = a.gitWrapper.SetLocalUserConfig(a.userConfig.Name, a.userConfig.Email)
+	}
+}
+
+// LoadLocalUserConfig 从 .git/config 加载已保存的用户信息
+// 如果本地仓库配置中有 user.name 和 user.email，则覆盖内存中的配置
+func (a *Agent) LoadLocalUserConfig() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.gitWrapper == nil {
+		return
+	}
+	name, email, err := a.gitWrapper.GetLocalUserConfig()
+	if err != nil {
+		return
+	}
+	// 仅当内存中的配置为空时，才使用 .git/config 中的值
+	if a.userConfig.Name == "" && name != "" {
+		a.userConfig.Name = name
+	}
+	if a.userConfig.Email == "" && email != "" {
 		a.userConfig.Email = email
 	}
 }

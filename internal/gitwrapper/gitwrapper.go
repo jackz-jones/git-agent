@@ -40,10 +40,20 @@ type FileChange struct {
 
 // StatusInfo 表示仓库状态信息
 type StatusInfo struct {
-	Staged    []FileChange `json:"staged"`
-	Unstaged  []FileChange `json:"unstaged"`
-	Untracked []string     `json:"untracked"`
-	IsClean   bool         `json:"is_clean"`
+	Staged       []FileChange `json:"staged"`
+	Unstaged     []FileChange `json:"unstaged"`
+	Untracked    []string     `json:"untracked"`
+	IsClean      bool         `json:"is_clean"`
+	LatestCommit *VersionInfo `json:"latest_commit,omitempty"`    // 最新一次提交的信息
+	AheadBehind  *AheadBehind `json:"ahead_behind,omitempty"`     // 本地与远程的领先/落后情况
+}
+
+// AheadBehind 表示本地分支相对远程分支的领先/落后提交数
+type AheadBehind struct {
+	Ahead  int    `json:"ahead"`   // 本地领先远程的提交数
+	Behind int    `json:"behind"`  // 本地落后远程的提交数
+	Remote string `json:"remote"`  // 远程仓库名称
+	Branch string `json:"branch"`  // 当前分支名
 }
 
 // BranchInfo 表示分支信息
@@ -263,6 +273,7 @@ func (g *GitWrapper) GetHistory(filePath string, limit int, author string) ([]Ve
 	}
 
 	var versions []VersionInfo
+	count := 0
 	err = iter.ForEach(func(c *object.Commit) error {
 		// 按作者过滤
 		if author != "" && c.Author.Name != author {
@@ -276,10 +287,19 @@ func (g *GitWrapper) GetHistory(filePath string, limit int, author string) ([]Ve
 			Date:      c.Author.When,
 			Message:   c.Message,
 		})
+		count++
+		if limit > 0 && count >= limit {
+			return fmt.Errorf("limit reached")
+		}
 		return nil
 	})
 
-	return versions, err
+	// "limit reached" 不是真正的错误，忽略
+	if err != nil && err.Error() != "limit reached" {
+		return nil, err
+	}
+
+	return versions, nil
 }
 
 // Log 获取提交日志
@@ -428,6 +448,28 @@ func (g *GitWrapper) Status() (*StatusInfo, error) {
 		case git.Untracked:
 			info.Untracked = append(info.Untracked, file)
 		}
+	}
+
+	// 获取最新提交信息
+	headRef, err := g.repo.Head()
+	if err == nil {
+		headCommit, err := g.repo.CommitObject(headRef.Hash())
+		if err == nil {
+			info.LatestCommit = &VersionInfo{
+				Hash:      headCommit.Hash.String(),
+				ShortHash: headCommit.Hash.String()[:8],
+				Author:    headCommit.Author.Name,
+				Email:     headCommit.Author.Email,
+				Date:      headCommit.Author.When,
+				Message:   headCommit.Message,
+			}
+		}
+	}
+
+	// 获取 ahead/behind 信息
+	aheadBehind, _ := g.GetAheadBehind()
+	if aheadBehind != nil {
+		info.AheadBehind = aheadBehind
 	}
 
 	return info, nil
@@ -1717,6 +1759,182 @@ func (g *GitWrapper) GetRepo() *git.Repository {
 }
 
 // ensureRepo 确保仓库已初始化
+// GetLocalUserConfig 从 .git/config 中读取本地仓库的用户配置（user.name 和 user.email）
+func (g *GitWrapper) GetLocalUserConfig() (name, email string, err error) {
+	if err := g.ensureRepo(); err != nil {
+		return "", "", err
+	}
+
+	cfg, err := g.repo.Config()
+	if err != nil {
+		return "", "", fmt.Errorf("读取仓库配置失败: %w", err)
+	}
+
+	return cfg.User.Name, cfg.User.Email, nil
+}
+
+// SetLocalUserConfig 将用户信息保存到 .git/config 中（持久化）
+func (g *GitWrapper) SetLocalUserConfig(name, email string) error {
+	if err := g.ensureRepo(); err != nil {
+		return err
+	}
+
+	cfg, err := g.repo.Config()
+	if err != nil {
+		return fmt.Errorf("读取仓库配置失败: %w", err)
+	}
+
+	if name != "" {
+		cfg.User.Name = name
+	}
+	if email != "" {
+		cfg.User.Email = email
+	}
+
+	err = g.repo.SetConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("保存仓库配置失败: %w", err)
+	}
+
+	return nil
+}
+
+// GetAheadBehind 获取当前分支相对远程跟踪分支的领先/落后提交数
+func (g *GitWrapper) GetAheadBehind() (*AheadBehind, error) {
+	if err := g.ensureRepo(); err != nil {
+		return nil, err
+	}
+
+	// 获取当前分支的 HEAD 引用
+	headRef, err := g.repo.Head()
+	if err != nil {
+		return nil, fmt.Errorf("获取 HEAD 引用失败: %w", err)
+	}
+
+	// 获取当前分支名
+	branchName := headRef.Name().Short()
+
+	// 查找对应的远程跟踪分支引用
+	remoteRefName := plumbing.ReferenceName("refs/remotes/origin/" + branchName)
+	remoteRef, err := g.repo.Reference(remoteRefName, false)
+	if err != nil {
+		// 没有远程跟踪分支，说明可能还没有推送过或者没有远程仓库
+		return nil, nil
+	}
+
+	localHash := headRef.Hash()
+	remoteHash := remoteRef.Hash()
+
+	// 如果本地和远程指向同一个 commit，则既不领先也不落后
+	if localHash == remoteHash {
+		return &AheadBehind{
+			Ahead:  0,
+			Behind: 0,
+			Remote: "origin",
+			Branch: branchName,
+		}, nil
+	}
+
+	// 通过遍历 commit 链来计算 ahead/behind
+	ahead := 0
+	behind := 0
+
+	// 计算 ahead：从 local HEAD 到 remote HEAD 有多少个 commit
+	localCommit, err := g.repo.CommitObject(localHash)
+	if err != nil {
+		return nil, fmt.Errorf("获取本地 HEAD 提交失败: %w", err)
+	}
+
+	// 从 local HEAD 往回遍历，直到找到 remote HEAD
+	iter, err := g.repo.Log(&git.LogOptions{From: localHash})
+	if err != nil {
+		return nil, fmt.Errorf("获取本地提交历史失败: %w", err)
+	}
+
+	foundRemote := false
+	err = iter.ForEach(func(c *object.Commit) error {
+		if c.Hash == remoteHash {
+			foundRemote = true
+			return fmt.Errorf("stop")
+		}
+		ahead++
+		return nil
+	})
+	if err != nil && err.Error() != "stop" {
+		return nil, err
+	}
+
+	if !foundRemote {
+		// remote HEAD 不在 local 的历史中，说明分叉了
+		// 尝试从 remote HEAD 往回遍历
+		ahead = 0
+		remoteIter, err := g.repo.Log(&git.LogOptions{From: remoteHash})
+		if err != nil {
+			return nil, nil // 无法确定，返回 nil
+		}
+		foundLocal := false
+		err = remoteIter.ForEach(func(c *object.Commit) error {
+			if c.Hash == localHash {
+				foundLocal = true
+				return fmt.Errorf("stop")
+			}
+			behind++
+			return nil
+		})
+		if err != nil && err.Error() != "stop" {
+			return nil, nil
+		}
+
+		if !foundLocal {
+			// 真正的分叉情况，需要更复杂的 merge-base 计算
+			// 简化处理：只报告分叉
+			return &AheadBehind{
+				Ahead:  -1, // -1 表示分叉
+				Behind: -1,
+				Remote: "origin",
+				Branch: branchName,
+			}, nil
+		}
+	} else {
+		// remote HEAD 在 local 的历史中，计算 behind
+		behind = 0
+		remoteIter, err := g.repo.Log(&git.LogOptions{From: remoteHash})
+		if err != nil {
+			return &AheadBehind{
+				Ahead:  ahead,
+				Behind: 0,
+				Remote: "origin",
+				Branch: branchName,
+			}, nil
+		}
+		err = remoteIter.ForEach(func(c *object.Commit) error {
+			if c.Hash == localHash {
+				return fmt.Errorf("stop")
+			}
+			behind++
+			return nil
+		})
+		if err != nil && err.Error() != "stop" {
+			return &AheadBehind{
+				Ahead:  ahead,
+				Behind: 0,
+				Remote: "origin",
+				Branch: branchName,
+			}, nil
+		}
+	}
+
+	// 如果不使用 localCommit 变量，避免编译错误
+	_ = localCommit
+
+	return &AheadBehind{
+		Ahead:  ahead,
+		Behind: behind,
+		Remote: "origin",
+		Branch: branchName,
+	}, nil
+}
+
 func (g *GitWrapper) ensureRepo() error {
 	if g.repo == nil {
 		return fmt.Errorf("仓库尚未初始化，请先初始化仓库")

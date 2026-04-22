@@ -30,13 +30,13 @@ var AllGitAgentTools = []GitAgentTool{
 	},
 	{
 		Name:        "view_history",
-		Description: "查看文件或仓库的修改历史记录。",
+		Description: "查看文件或仓库的修改历史记录。当用户问「最新提交」「最近一次提交」「最后一次提交」时，设置 limit=1 来获取。当用户想看更多历史时，可增大 limit。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"limit": map[string]any{
 					"type":        "integer",
-					"description": "显示的记录条数，默认10",
+					"description": "显示的记录条数，默认10。用户问「最新提交」时设为1",
 				},
 				"author": map[string]any{
 					"type":        "string",
@@ -85,7 +85,7 @@ var AllGitAgentTools = []GitAgentTool{
 	},
 	{
 		Name:        "view_status",
-		Description: "查看当前仓库的修改状态，显示哪些文件有改动。",
+		Description: "查看当前仓库的修改状态。返回内容包括：已暂存/未暂存的文件变更、最新一次提交信息（latest_commit）、以及本地与远程仓库的同步情况（ahead_behind，包含 ahead 领先数和 behind 落数）。当用户问「最新提交」「最近一次提交」时，请优先使用 view_history 工具而非此工具。",
 		Parameters: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},

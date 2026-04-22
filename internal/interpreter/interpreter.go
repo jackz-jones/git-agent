@@ -1,6 +1,7 @@
 package interpreter
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -343,6 +344,11 @@ func (i *Interpreter) TranslateResult(intent *UserIntent, result interface{}) st
 	case IntentListBranches:
 		return i.translateBranchListResult(result)
 	case IntentPush:
+		if result != nil {
+			if m, ok := result.(map[string]string); ok && m["status"] == "up_to_date" {
+				return "ℹ️ 本地和远程已完全同步，无需推送"
+			}
+		}
 		return "✅ 已同步到远程仓库"
 	case IntentPull:
 		return "✅ 已获取最新内容"
@@ -783,22 +789,145 @@ func (i *Interpreter) translateSaveResult(result interface{}) string {
 }
 
 func (i *Interpreter) translateHistoryResult(result interface{}) string {
-	versions, ok := result.([]interface{})
-	if !ok {
+	// 统一通过 JSON 序列化/反序列化来提取数据
+	// 因为 interpreter 包不依赖 planner/gitwrapper 包，无法直接类型断言
+	// ExecutionResult 结构: {"completed_steps":[{"result": [...versions...]}]}
+	// 也可能直接传入版本列表
+
+	jsonData, err := json.Marshal(result)
+	if err != nil {
 		return "暂无历史记录"
 	}
+
+	// 先尝试解析为 ExecutionResult 格式（包含 completed_steps）
+	var execResult struct {
+		CompletedSteps []struct {
+			Result json.RawMessage `json:"result"`
+		} `json:"completed_steps"`
+	}
+	if err := json.Unmarshal(jsonData, &execResult); err == nil && len(execResult.CompletedSteps) > 0 {
+		// 找到包含版本列表的 step result
+		for _, step := range execResult.CompletedSteps {
+			var versions []map[string]interface{}
+			if err := json.Unmarshal(step.Result, &versions); err == nil && len(versions) > 0 {
+				return buildVersionTable(versions)
+			}
+		}
+	}
+
+	// 直接作为版本列表处理
+	return formatVersionTable(result)
+}
+
+// buildVersionTable 将已解析的版本列表格式化为 Markdown 表格
+func buildVersionTable(versions []map[string]interface{}) string {
 	if len(versions) == 0 {
 		return "暂无历史记录"
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📋 共找到 %d 条历史记录：\n", len(versions)))
+
+	// 表头
+	sb.WriteString("\n")
+	sb.WriteString("| ID | 提交 Hash | 提交人 | 时间 | 修改内容 |\n")
+	sb.WriteString("|-----|----------|--------|------|----------|\n")
+
 	for idx, v := range versions {
-		if vi, ok := v.(interface{ GetShortHash() string }); ok {
-			sb.WriteString(fmt.Sprintf("  %d. 版本#%s\n", idx+1, vi.GetShortHash()))
+		shortHash := toStrFromMap(v, "short_hash")
+		author := toStrFromMap(v, "author")
+		date := toStrFromMap(v, "date")
+		message := toStrFromMap(v, "message")
+
+		// 格式化时间（只保留日期部分）
+		dateStr := date
+		if len(dateStr) > 10 {
+			dateStr = dateStr[:10]
+		}
+		// 清理 message 中的换行
+		message = strings.TrimSpace(strings.ReplaceAll(message, "\n", " "))
+		// 截断过长的 message
+		if len([]rune(message)) > 50 {
+			message = string([]rune(message)[:50]) + "..."
+		}
+
+		sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %s |\n", idx+1, shortHash, author, dateStr, message))
+	}
+
+	return sb.String()
+}
+
+// formatVersionTable 将版本信息格式化为 Markdown 表格
+// 支持多种输入类型：[]gitwrapper.VersionInfo、[]interface{}、map 等
+func formatVersionTable(result interface{}) string {
+	// 尝试通过反射处理 []VersionInfo 或 []interface{}
+	// 由于 interpreter 包不依赖 gitwrapper 包，使用 JSON 序列化/反序列化来提取字段
+
+	// 先尝试 JSON 序列化
+	jsonData, err := json.Marshal(result)
+	if err != nil {
+		return "暂无历史记录"
+	}
+
+	// 反序列化为通用结构
+	var versions []map[string]interface{}
+	if err := json.Unmarshal(jsonData, &versions); err != nil {
+		// 可能是单个对象
+		var single map[string]interface{}
+		if err2 := json.Unmarshal(jsonData, &single); err2 == nil {
+			versions = []map[string]interface{}{single}
+		} else {
+			return "暂无历史记录"
 		}
 	}
+
+	if len(versions) == 0 {
+		return "暂无历史记录"
+	}
+
+	var sb strings.Builder
+
+	// 表头
+	sb.WriteString("\n")
+	sb.WriteString("| ID | 提交 Hash | 提交人 | 时间 | 修改内容 |\n")
+	sb.WriteString("|-----|----------|--------|------|----------|\n")
+
+	for idx, v := range versions {
+		shortHash := toStrFromMap(v, "short_hash")
+		author := toStrFromMap(v, "author")
+		date := toStrFromMap(v, "date")
+		message := toStrFromMap(v, "message")
+
+		// 格式化时间（只保留日期部分）
+		dateStr := date
+		if len(dateStr) > 10 {
+			dateStr = dateStr[:10]
+		}
+		// 清理 message 中的换行
+		message = strings.TrimSpace(strings.ReplaceAll(message, "\n", " "))
+		// 截断过长的 message
+		if len([]rune(message)) > 50 {
+			message = string([]rune(message)[:50]) + "..."
+		}
+
+		sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %s |\n", idx+1, shortHash, author, dateStr, message))
+	}
+
 	return sb.String()
+}
+
+// toStrFromMap 从 map[string]interface{} 中安全提取字符串值
+func toStrFromMap(m map[string]interface{}, key string) string {
+	if v, ok := m[key]; ok {
+		switch val := v.(type) {
+		case string:
+			return val
+		case float64:
+			return fmt.Sprintf("%.0f", val)
+		default:
+			return fmt.Sprintf("%v", val)
+		}
+	}
+	return ""
 }
 
 func (i *Interpreter) translateDiffResult(result interface{}) string {

@@ -99,24 +99,6 @@ func runInteractive(repoPath, apiKey, baseURL, model string) {
 		Language: "zh",
 	}
 
-	// 检查用户信息是否已配置
-	if userConfig.Name == "" || userConfig.Email == "" {
-		fmt.Println()
-		fmt.Printf("  %s⚠ 用户信息未配置%s\n", styleWarn, colorReset)
-		if userConfig.Name == "" {
-			fmt.Printf("  %sexport GIT_AGENT_USER=你的名字%s\n", colorGray, colorReset)
-		}
-		if userConfig.Email == "" {
-			fmt.Printf("  %sexport GIT_AGENT_EMAIL=你的邮箱%s\n", colorGray, colorReset)
-		}
-		fmt.Printf("  %s或在交互中告诉我您的名字和邮箱%s\n", colorGray, colorReset)
-	}
-
-	// 快捷提示
-	fmt.Println()
-	fmt.Printf("  %s输入「帮助」查看所有操作  输入「退出」结束会话%s\n", colorGray, colorReset)
-	fmt.Println()
-
 	// 创建 Agent
 	var a *agent.Agent
 	var err error
@@ -131,6 +113,29 @@ func runInteractive(repoPath, apiKey, baseURL, model string) {
 		fmt.Printf("  %s初始化失败：%v%s\n", styleError, err, colorReset)
 		fmt.Printf("  %s提示：输入「初始化仓库」创建新仓库%s\n", colorGray, colorReset)
 	}
+
+	// 从 .git/config 加载已保存的用户信息（优先级：环境变量 > .git/config）
+	if a != nil {
+		a.LoadLocalUserConfig()
+	}
+
+	// 检查用户信息是否已配置（此时已合并环境变量和 .git/config）
+	if a != nil && (a.GetUserConfig().Name == "" || a.GetUserConfig().Email == "") {
+		fmt.Println()
+		fmt.Printf("  %s⚠ 用户信息未配置%s\n", styleWarn, colorReset)
+		if a.GetUserConfig().Name == "" {
+			fmt.Printf("  %sexport GIT_AGENT_USER=你的名字%s\n", colorGray, colorReset)
+		}
+		if a.GetUserConfig().Email == "" {
+			fmt.Printf("  %sexport GIT_AGENT_EMAIL=你的邮箱%s\n", colorGray, colorReset)
+		}
+		fmt.Printf("  %s或在交互中告诉我您的名字和邮箱%s\n", colorGray, colorReset)
+	}
+
+	// 快捷提示
+	fmt.Println()
+	fmt.Printf("  %s输入「帮助」查看所有操作  输入「退出」结束会话%s\n", colorGray, colorReset)
+	fmt.Println()
 
 	reader := bufio.NewReader(os.Stdin)
 	ctx := context.Background()
