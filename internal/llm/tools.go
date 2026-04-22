@@ -197,13 +197,21 @@ var AllGitAgentTools = []GitAgentTool{
 	},
 	{
 		Name:        "push_to_remote",
-		Description: "将本地修改推送到远程仓库，同步给团队。",
+		Description: "将本地修改推送到远程仓库，同步给团队。如果推送失败提示认证问题，可以提供 username 和 password 参数重试。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"remote": map[string]any{
 					"type":        "string",
 					"description": "远程仓库名称，默认origin",
+				},
+				"username": map[string]any{
+					"type":        "string",
+					"description": "认证用户名（推送失败需要认证时使用，如 GitHub 用户名）",
+				},
+				"password": map[string]any{
+					"type":        "string",
+					"description": "认证密码或访问令牌（推送失败需要认证时使用，如 GitHub Personal Access Token）",
 				},
 			},
 		},

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -12,7 +13,9 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	fdiff "github.com/go-git/go-git/v5/plumbing/format/diff"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/go-git/go-git/v5/utils/merkletrie"
 )
 
@@ -1067,18 +1070,28 @@ func (g *GitWrapper) Push(remote string) error {
 		return fmt.Errorf("找不到远程仓库 %s: %w", remote, err)
 	}
 
-	err = remoteObj.Push(&git.PushOptions{
+	pushOpts := &git.PushOptions{
 		RemoteName: remote,
-		Auth:       nil, // TODO: 支持认证
-	})
+	}
+
+	// 自动检测远程 URL 类型并配置认证
+	auth, err := g.getAuthForRemote(remoteObj)
 	if err != nil {
-		return fmt.Errorf("推送到 %s 失败: %w", remote, err)
+		return fmt.Errorf("推送失败，远程仓库连接有问题: %w", err)
+	}
+	if auth != nil {
+		pushOpts.Auth = auth
+	}
+
+	err = remoteObj.Push(pushOpts)
+	if err != nil {
+		return classifyPushError(err, remote)
 	}
 
 	return nil
 }
 
-// PushWithAuth 使用认证推送
+// PushWithAuth 使用认证推送（HTTPS 方式，需要用户名和密码/令牌）
 func (g *GitWrapper) PushWithAuth(remote, username, password string) error {
 	if err := g.ensureRepo(); err != nil {
 		return err
@@ -1097,10 +1110,184 @@ func (g *GitWrapper) PushWithAuth(remote, username, password string) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("推送到 %s 失败: %w", remote, err)
+		return classifyPushError(err, remote)
 	}
 
 	return nil
+}
+
+// GetRemoteURL 获取远程仓库的 URL
+func (g *GitWrapper) GetRemoteURL(remote string) (string, error) {
+	if err := g.ensureRepo(); err != nil {
+		return "", err
+	}
+
+	remoteObj, err := g.repo.Remote(remote)
+	if err != nil {
+		return "", fmt.Errorf("找不到远程仓库 %s: %w", remote, err)
+	}
+
+	config := remoteObj.Config()
+	if config == nil || len(config.URLs) == 0 {
+		return "", fmt.Errorf("远程仓库 %s 没有配置地址", remote)
+	}
+
+	return config.URLs[0], nil
+}
+
+// isSSHURL 判断 URL 是否为 SSH 格式
+func isSSHURL(url string) bool {
+	return strings.HasPrefix(url, "git@") ||
+		strings.HasPrefix(url, "ssh://") ||
+		strings.HasPrefix(url, "git://")
+}
+
+// isHTTPSURL 判断 URL 是否为 HTTPS 格式
+func isHTTPSURL(url string) bool {
+	return strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "http://")
+}
+
+// getAuthForRemote 根据远程 URL 自动选择认证方式
+func (g *GitWrapper) getAuthForRemote(remoteObj *git.Remote) (transport.AuthMethod, error) {
+	config := remoteObj.Config()
+	if config == nil || len(config.URLs) == 0 {
+		return nil, nil
+	}
+
+	url := config.URLs[0]
+
+	// HTTPS 远程仓库：尝试从环境变量获取凭据
+	if isHTTPSURL(url) {
+		username := os.Getenv("GIT_HTTP_USERNAME")
+		password := os.Getenv("GIT_HTTP_PASSWORD")
+		if username != "" && password != "" {
+			return &http.BasicAuth{
+				Username: username,
+				Password: password,
+			}, nil
+		}
+		// 没有配置凭据，尝试无认证推送（公开仓库可能不需要）
+		return nil, nil
+	}
+
+	// SSH 远程仓库：尝试 SSH Agent 或默认密钥
+	if isSSHURL(url) {
+		// 优先尝试 SSH Agent（用户已加载密钥到 agent）
+		auth, err := ssh.NewSSHAgentAuth("git")
+		if err == nil {
+			return auth, nil
+		}
+
+		// 尝试默认的 SSH 密钥文件
+		homeDir, err := os.UserHomeDir()
+		if err == nil {
+			for _, keyFile := range []string{"id_ed25519", "id_rsa", "id_ecdsa"} {
+				keyPath := filepath.Join(homeDir, ".ssh", keyFile)
+				if _, statErr := os.Stat(keyPath); statErr == nil {
+					auth, err := ssh.NewPublicKeysFromFile("git", keyPath, "")
+					if err == nil {
+						return auth, nil
+					}
+				}
+			}
+		}
+
+		// SSH 认证都失败了，返回友好的错误信息
+		return nil, &AuthError{
+			RemoteURL: url,
+			AuthType:  "ssh",
+			Cause:     fmt.Errorf("SSH 密钥未配置或无法加载"),
+		}
+	}
+
+	return nil, nil
+}
+
+// AuthError 认证错误（用于提供友好的错误信息）
+type AuthError struct {
+	RemoteURL string
+	AuthType  string // "ssh" 或 "https"
+	Cause     error
+}
+
+func (e *AuthError) Error() string {
+	return e.Cause.Error()
+}
+
+// classifyPushError 对推送错误进行分类，返回用户友好的错误信息
+func classifyPushError(err error, remote string) error {
+	msg := err.Error()
+
+	// SSH 认证失败
+	if containsAnyLower(msg,
+		"permission denied",
+		"authentication failed",
+		"unable to authenticate",
+		"ssh: handshake failed",
+		"host key",
+		"knownhosts",
+		"no supported methods remain",
+	) {
+		return &AuthError{
+			RemoteURL: remote,
+			AuthType:  "ssh",
+			Cause:     fmt.Errorf("远程仓库连接认证失败"),
+		}
+	}
+
+	// HTTPS 认证失败
+	if containsAnyLower(msg,
+		"authorization failed",
+		"access denied",
+		"403",
+		"credentials",
+		"authentication required",
+	) {
+		return &AuthError{
+			RemoteURL: remote,
+			AuthType:  "https",
+			Cause:     fmt.Errorf("远程仓库访问凭据无效"),
+		}
+	}
+
+	// 网络连接问题
+	if containsAnyLower(msg,
+		"connection refused",
+		"connection timed out",
+		"no such host",
+		"network is unreachable",
+		"i/o timeout",
+		"dial tcp",
+	) {
+		return fmt.Errorf("无法连接到远程仓库，请检查网络连接")
+	}
+
+	// 远程仓库拒绝推送（非快进）
+	if containsAnyLower(msg,
+		"non-fast-forward",
+		"would clobber",
+		"updates were rejected",
+	) {
+		return fmt.Errorf("远程仓库有更新的内容，请先拉取最新修改再推送")
+	}
+
+	// 仓库不存在
+	if containsAnyLower(msg, "repository not found", "not found") {
+		return fmt.Errorf("远程仓库不存在，请确认仓库地址是否正确")
+	}
+
+	return fmt.Errorf("推送到 %s 失败: %w", remote, err)
+}
+
+// containsAnyLower 不区分大小写地检查字符串是否包含任一子串
+func containsAnyLower(s string, substrs ...string) bool {
+	lower := strings.ToLower(s)
+	for _, sub := range substrs {
+		if strings.Contains(lower, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // Pull 从远程仓库拉取
@@ -1114,14 +1301,63 @@ func (g *GitWrapper) Pull(remote string) error {
 		return fmt.Errorf("获取工作区失败: %w", err)
 	}
 
-	err = wt.Pull(&git.PullOptions{
+	pullOpts := &git.PullOptions{
 		RemoteName: remote,
-	})
+	}
+
+	// 自动检测远程 URL 类型并配置认证
+	remoteObj, err := g.repo.Remote(remote)
+	if err == nil {
+		auth, authErr := g.getAuthForRemote(remoteObj)
+		if authErr != nil {
+			return fmt.Errorf("拉取失败，远程仓库连接有问题: %w", authErr)
+		}
+		if auth != nil {
+			pullOpts.Auth = auth
+		}
+	}
+
+	err = wt.Pull(pullOpts)
 	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return fmt.Errorf("从 %s 拉取失败: %w", remote, err)
+		return classifyPullError(err, remote)
 	}
 
 	return nil
+}
+
+// classifyPullError 对拉取错误进行分类，返回用户友好的错误信息
+func classifyPullError(err error, remote string) error {
+	msg := err.Error()
+
+	// 认证失败
+	if containsAnyLower(msg,
+		"permission denied",
+		"authentication failed",
+		"unable to authenticate",
+		"authorization failed",
+		"access denied",
+		"403",
+	) {
+		return &AuthError{
+			RemoteURL: remote,
+			AuthType:  "ssh",
+			Cause:     fmt.Errorf("远程仓库连接认证失败"),
+		}
+	}
+
+	// 网络连接问题
+	if containsAnyLower(msg,
+		"connection refused",
+		"connection timed out",
+		"no such host",
+		"network is unreachable",
+		"i/o timeout",
+		"dial tcp",
+	) {
+		return fmt.Errorf("无法连接到远程仓库，请检查网络连接")
+	}
+
+	return fmt.Errorf("从 %s 拉取失败: %w", remote, err)
 }
 
 // CreateTag 创建标签

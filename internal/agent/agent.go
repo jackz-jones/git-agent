@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -239,7 +240,20 @@ func (a *Agent) registerToolExecutors() {
 		}
 		remote := "origin"
 		if err := a.gitWrapper.Push(remote); err != nil {
-			return toJSONResult(map[string]string{"hash": hash, "push_error": err.Error()}, nil)
+			// 推送失败但本地保存成功，返回部分成功信息
+			var authErr *gitwrapper.AuthError
+			if errors.As(err, &authErr) {
+				return toJSONResult(map[string]string{
+					"hash":          hash,
+					"push_error":    "auth_failed",
+					"error_message": "远程仓库连接认证失败",
+				}, nil)
+			}
+			return toJSONResult(map[string]string{
+				"hash":          hash,
+				"push_error":    err.Error(),
+				"error_message": translateError(err),
+			}, nil)
 		}
 		return toJSONResult(map[string]string{"hash": hash}, nil)
 	})
@@ -298,8 +312,23 @@ func (a *Agent) registerToolExecutors() {
 	// push_to_remote
 	a.toolRegistry.Register("push_to_remote", func(ctx context.Context, params map[string]interface{}) (string, error) {
 		remote := toString(params["remote"], "origin")
+		username := toString(params["username"], "")
+		password := toString(params["password"], "")
+
+		// 如果提供了认证信息，使用 PushWithAuth
+		if username != "" && password != "" {
+			err := a.gitWrapper.PushWithAuth(remote, username, password)
+			if err != nil {
+				return "", err
+			}
+			return toJSONResult(nil, nil)
+		}
+
 		err := a.gitWrapper.Push(remote)
-		return toJSONResult(nil, err)
+		if err != nil {
+			return "", err
+		}
+		return toJSONResult(nil, nil)
 	})
 
 	// pull_from_remote
@@ -323,6 +352,10 @@ func (a *Agent) registerToolExecutors() {
 		return toJSONResult(result, err)
 	})
 }
+
+// maxReActIterations ReAct 循环最大迭代次数
+// 防止 LLM 反复调用同一工具导致无限循环
+const maxReActIterations = 5
 
 // intentToolMapping 意图到工具名称的映射
 // 用于智能筛选发送给 LLM 的工具，避免小模型被过多工具干扰
@@ -442,13 +475,14 @@ func (a *Agent) processWithLLM(ctx context.Context, input string) *AgentResponse
 		return a.fallbackToLocal(ctx, input, err)
 	}
 
-	// 处理 LLM 响应
-	return a.handleLLMResponse(ctx, resp)
+	// 处理 LLM 响应，从第 1 次迭代开始
+	return a.handleLLMResponse(ctx, resp, 1)
 }
 
 // handleLLMResponse 处理 LangChain LLM 响应
 // 支持 ReAct 多轮：LLM 可能返回工具调用 → 执行工具 → 结果回传 → LLM 继续推理
-func (a *Agent) handleLLMResponse(ctx context.Context, resp *llms.ContentResponse) *AgentResponse {
+// iteration: 当前迭代次数，用于防止无限循环
+func (a *Agent) handleLLMResponse(ctx context.Context, resp *llms.ContentResponse, iteration int) *AgentResponse {
 	if len(resp.Choices) == 0 {
 		a.setState(StateIdle)
 		return &AgentResponse{
@@ -508,7 +542,7 @@ func (a *Agent) handleLLMResponse(ctx context.Context, resp *llms.ContentRespons
 
 	// 如果有工具调用，执行工具并将结果回传 LLM
 	if len(toolCalls) > 0 {
-		return a.handleLangChainToolCalls(ctx, toolCalls, &totalUsage)
+		return a.handleLangChainToolCalls(ctx, toolCalls, &totalUsage, iteration)
 	}
 
 	// LLM 直接回复（普通对话或帮助类问题）
@@ -525,7 +559,11 @@ func (a *Agent) handleLLMResponse(ctx context.Context, resp *llms.ContentRespons
 
 // handleLangChainToolCalls 处理 LangChain 格式的工具调用
 // 这是 ReAct 模式的核心：LLM 决定调用什么工具 → 执行工具 → 结果回传 LLM → LLM 生成最终回复
-func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.ToolCall, totalUsage *llm.Usage) *AgentResponse {
+// iteration: 当前迭代次数，用于防止无限循环
+func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.ToolCall, totalUsage *llm.Usage, iteration int) *AgentResponse {
+	// 重复工具调用检测：追踪本次迭代中调用的工具名称
+	seenTools := make(map[string]int) // toolName → 连续调用次数
+
 	for _, tc := range toolCalls {
 		a.setState(StateExecuting)
 
@@ -535,6 +573,24 @@ func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.T
 		if tc.FunctionCall != nil {
 			toolName = tc.FunctionCall.Name
 			toolArgs = tc.FunctionCall.Arguments
+		}
+
+		// 检测重复工具调用：同一工具在同一轮中被连续调用
+		seenTools[toolName]++
+		if seenTools[toolName] > 2 {
+			// 同一工具被重复调用过多，跳出循环防止无限循环
+			a.setState(StateError)
+			errMsg := fmt.Sprintf("工具 %s 被重复调用多次，可能当前操作已完成但系统未正确识别。", toolName)
+			return &AgentResponse{
+				Success: false,
+				Message: errMsg + "建议先查看当前状态，确认操作是否已经成功。",
+				State:   StateError,
+				Suggestions: []string{
+					"查看当前状态",
+					"查看修改内容",
+				},
+				Timestamp: time.Now(),
+			}
 		}
 
 		// 通过工具注册中心执行工具
@@ -557,7 +613,13 @@ func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.T
 		// 执行工具
 		result, err := tool.Call(ctx, toolArgs)
 		if err != nil {
-			result = fmt.Sprintf("工具执行失败: %v", err)
+			// 对 AuthError 提供友好提示，引导 LLM 给出非技术性的建议
+			var authErr *gitwrapper.AuthError
+			if errors.As(err, &authErr) {
+				result = "推送失败：远程仓库需要身份验证，但当前没有配置有效的认证方式。请用通俗语言告诉用户推送失败了，建议他们联系技术同事帮忙配置访问权限，或者提供用户名和访问令牌来重试。不要提及 SSH、密钥、公钥等技术术语，不要建议执行任何命令行操作。"
+			} else {
+				result = fmt.Sprintf("操作失败：%s", translateError(err))
+			}
 		}
 
 		// 将工具执行结果加入对话历史
@@ -597,7 +659,22 @@ func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.T
 	}
 
 	// 递归处理 LLM 的后续响应（可能还有工具调用 = 多轮 ReAct）
-	return a.handleLLMResponse(ctx, resp)
+	// 检查迭代次数上限，防止无限循环
+	nextIteration := iteration + 1
+	if nextIteration > maxReActIterations {
+		a.setState(StateError)
+		return &AgentResponse{
+			Success: false,
+			Message: "操作陷入循环，已自动终止。这可能是因为当前修改状态异常，建议先查看当前状态，确认修改是否已成功保存。",
+			State:   StateError,
+			Suggestions: []string{
+				"查看当前状态",
+				"查看修改内容",
+			},
+			Timestamp: time.Now(),
+		}
+	}
+	return a.handleLLMResponse(ctx, resp, nextIteration)
 }
 
 // processLocal 本地 fallback 处理（不使用 LLM）
@@ -644,6 +721,25 @@ func (a *Agent) processLocal(ctx context.Context, input string) *AgentResponse {
 			a.setState(StateConflicting)
 			return a.handleConflict(result, err)
 		}
+
+		// 认证错误：提供更友好的建议
+		var authErr *gitwrapper.AuthError
+		if errors.As(err, &authErr) {
+			a.setState(StateError)
+			return &AgentResponse{
+				Success: false,
+				Message: "抱歉，推送失败了！远程仓库需要身份验证，但当前没有配置有效的认证方式。",
+				Details: err.Error(),
+				State:   StateError,
+				Suggestions: []string{
+					"请联系您的技术同事，帮忙配置 SSH 密钥或访问令牌",
+					"如果您有 GitHub 账号，可以告诉同事您需要：1）在电脑上生成 SSH 密钥；2）把公钥添加到 GitHub",
+					"也可以尝试提供用户名和访问令牌来推送",
+				},
+				Timestamp: time.Now(),
+			}
+		}
+
 		a.setState(StateError)
 		return &AgentResponse{
 			Success: false,
@@ -752,7 +848,16 @@ func (a *Agent) executeStep(step *planner.Step) (interface{}, error) {
 		if remote == "" {
 			remote = "origin"
 		}
-		return nil, a.gitWrapper.Push(remote)
+		err := a.gitWrapper.Push(remote)
+		if err != nil {
+			// 对 AuthError 不直接返回，包装为友好错误
+			var authErr *gitwrapper.AuthError
+			if errors.As(err, &authErr) {
+				return nil, fmt.Errorf("远程仓库连接认证失败")
+			}
+			return nil, err
+		}
+		return nil, nil
 
 	case planner.StepGitPull:
 		remote := step.Params["remote"]
@@ -979,6 +1084,13 @@ func isConflictError(err error) bool {
 
 func translateError(err error) string {
 	msg := err.Error()
+
+	// 优先检查 AuthError 类型
+	var authErr *gitwrapper.AuthError
+	if errors.As(err, &authErr) {
+		return "远程仓库连接认证失败"
+	}
+
 	translations := map[string]string{
 		"repository not initialized": "仓库尚未初始化",
 		"no changes to commit":       "没有需要保存的修改",
@@ -987,6 +1099,10 @@ func translateError(err error) string {
 		"remote not found":           "找不到远程仓库",
 		"permission denied":          "权限不足",
 		"file not found":             "文件不存在",
+		"无法连接到远程仓库":            "无法连接到远程仓库，请检查网络",
+		"远程仓库有更新":              "远程仓库有更新的内容，请先获取最新修改",
+		"远程仓库不存在":              "远程仓库不存在，请确认仓库地址",
+		"认证失败":                    "远程仓库连接认证失败",
 	}
 	for eng, zh := range translations {
 		if contains(msg, eng) {
