@@ -240,13 +240,21 @@ func (p *Planner) planViewDiff(intent *interpreter.UserIntent) []*Step {
 	if file := intent.Params["file"]; file != "" {
 		params["file"] = file
 	}
+	if commitHash := intent.Params["commit_hash"]; commitHash != "" {
+		params["commit_hash"] = commitHash
+	}
+
+	desc := "查看文件修改差异"
+	if commitHash := intent.Params["commit_hash"]; commitHash != "" {
+		desc = fmt.Sprintf("查看提交 %s 的修改内容", commitHash)
+	}
 
 	return []*Step{
 		{
 			Type:     StepGitDiff,
 			Params:   params,
 			Required: true,
-			Desc:     "查看文件修改差异",
+			Desc:     desc,
 		},
 	}
 }

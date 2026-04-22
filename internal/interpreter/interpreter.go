@@ -100,7 +100,8 @@ func (i *Interpreter) initPatterns() {
 			keywords: []string{"差异", "区别", "变更", "不同", "改了什么", "diff", "changes", "对比",
 				"修改详情", "修改内容", "改动详情", "改动内容", "变更详情", "变更内容", "改了哪些",
 				"哪些改动", "改了啥", "有什么不同", "区别在哪", "对比一下", "看看差异", "查看差异",
-				"查看修改", "查看改动", "看看改了什么", "修改了什么", "改动"},
+				"查看修改", "查看改动", "看看改了什么", "修改了什么", "改动", "修改点", "改动点",
+				"具体修改", "具体改动", "提交的修改", "提交的改动"},
 			extractor: extractViewDiff,
 		},
 		// 提交更改给团队
@@ -481,9 +482,22 @@ func extractViewDiff(input string, matches []string) *UserIntent {
 
 	parts := strings.Fields(input)
 	for _, p := range parts {
+		// 去掉 # 前缀（如 "#df659e58" → "df659e58"）
+		cleanP := strings.TrimPrefix(p, "#")
+		if len(cleanP) >= 7 && isHexString(cleanP) {
+			intent.Params["commit_hash"] = cleanP
+			intent.Target = cleanP
+			break
+		}
+	}
+
+	// 提取文件名
+	for _, p := range parts {
 		if strings.Contains(p, ".") {
 			intent.Params["file"] = p
-			intent.Target = p
+			if intent.Target == "" {
+				intent.Target = p
+			}
 			break
 		}
 	}
@@ -789,6 +803,12 @@ func (i *Interpreter) translateHistoryResult(result interface{}) string {
 
 func (i *Interpreter) translateDiffResult(result interface{}) string {
 	if s, ok := result.(string); ok {
+		if s == "该提交没有文件变更" {
+			return "该提交没有文件变更"
+		}
+		if s == "没有发现修改" {
+			return "没有发现修改"
+		}
 		return fmt.Sprintf("📋 修改详情：\n%s", s)
 	}
 	return "没有发现修改"

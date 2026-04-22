@@ -68,13 +68,17 @@ var AllGitAgentTools = []GitAgentTool{
 	},
 	{
 		Name:        "view_diff",
-		Description: "查看文件的修改内容，对比当前版本和已保存版本的差异。",
+		Description: "查看文件的修改内容。如果指定 commit_hash，则查看该提交的修改点（相对于其父提交）；否则对比当前工作区和已保存版本的差异。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"file": map[string]any{
 					"type":        "string",
 					"description": "要查看的文件路径。留空表示查看所有修改",
+				},
+				"commit_hash": map[string]any{
+					"type":        "string",
+					"description": "提交的 hash 值。指定后会查看该提交相对于父提交的修改内容，例如用户想查看某个提交的具体修改点",
 				},
 			},
 		},

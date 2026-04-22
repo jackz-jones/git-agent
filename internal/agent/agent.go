@@ -219,6 +219,11 @@ func (a *Agent) registerToolExecutors() {
 	// view_diff
 	a.toolRegistry.Register("view_diff", func(ctx context.Context, params map[string]interface{}) (string, error) {
 		file := toString(params["file"], "")
+		commitHash := toString(params["commit_hash"], "")
+		if commitHash != "" {
+			result, err := a.gitWrapper.CommitDiff(commitHash)
+			return toJSONResult(result, err)
+		}
 		result, err := a.gitWrapper.Diff(file)
 		return toJSONResult(result, err)
 	})
@@ -921,6 +926,10 @@ func (a *Agent) executeStep(step *planner.Step) (interface{}, error) {
 
 	case planner.StepGitDiff:
 		filePath := step.Params["file"]
+		commitHash := step.Params["commit_hash"]
+		if commitHash != "" {
+			return a.gitWrapper.CommitDiff(commitHash)
+		}
 		return a.gitWrapper.Diff(filePath)
 
 	case planner.StepGitStatus:

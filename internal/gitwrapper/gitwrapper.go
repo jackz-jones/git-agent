@@ -566,6 +566,122 @@ func (g *GitWrapper) diffNewFile(wt *git.Worktree, filePath string) (string, err
 	return sb.String(), nil
 }
 
+// CommitDiff 查看某个 commit 相对其父 commit 的差异，等价于 git diff <commit>^..<commit>
+func (g *GitWrapper) CommitDiff(commitHash string) (string, error) {
+	if err := g.ensureRepo(); err != nil {
+		return "", err
+	}
+
+	hash := plumbing.NewHash(commitHash)
+	commit, err := g.repo.CommitObject(hash)
+	if err != nil {
+		return "", fmt.Errorf("找不到提交 %s: %w", commitHash, err)
+	}
+
+	commitTree, err := commit.Tree()
+	if err != nil {
+		return "", fmt.Errorf("获取提交文件树失败: %w", err)
+	}
+
+	// 获取父 commit
+	if len(commit.ParentHashes) == 0 {
+		// 初始提交：与空树对比，所有文件都是新增
+		return g.diffTreeAgainstEmpty(commitTree)
+	}
+
+	parentHash := commit.ParentHashes[0]
+	parentCommit, err := g.repo.CommitObject(parentHash)
+	if err != nil {
+		return "", fmt.Errorf("获取父提交失败: %w", err)
+	}
+
+	parentTree, err := parentCommit.Tree()
+	if err != nil {
+		return "", fmt.Errorf("获取父提交文件树失败: %w", err)
+	}
+
+	// 对比两棵文件树
+	patch, err := parentTree.Patch(commitTree)
+	if err != nil {
+		return "", fmt.Errorf("计算差异失败: %w", err)
+	}
+
+	if len(patch.FilePatches()) == 0 {
+		return "该提交没有文件变更", nil
+	}
+
+	var result strings.Builder
+	for _, filePatch := range patch.FilePatches() {
+		from, to := filePatch.Files()
+		if from != nil && to != nil {
+			result.WriteString(fmt.Sprintf("--- a/%s\n+++ b/%s\n", from.Path(), to.Path()))
+		} else if from != nil {
+			result.WriteString(fmt.Sprintf("--- a/%s\n+++ /dev/null\n", from.Path()))
+		} else if to != nil {
+			result.WriteString(fmt.Sprintf("--- /dev/null\n+++ b/%s\n", to.Path()))
+		}
+
+		chunks := filePatch.Chunks()
+		for _, chunk := range chunks {
+			content := chunk.Content()
+			switch chunk.Type() {
+			case fdiff.Add:
+				for _, line := range strings.Split(content, "\n") {
+					if line != "" {
+						result.WriteString("+")
+						result.WriteString(line)
+						result.WriteString("\n")
+					}
+				}
+			case fdiff.Delete:
+				for _, line := range strings.Split(content, "\n") {
+					if line != "" {
+						result.WriteString("-")
+						result.WriteString(line)
+						result.WriteString("\n")
+					}
+				}
+		case fdiff.Equal:
+				for _, line := range strings.Split(content, "\n") {
+					if line != "" {
+						result.WriteString(" ")
+						result.WriteString(line)
+						result.WriteString("\n")
+					}
+				}
+			}
+		}
+		result.WriteString("\n")
+	}
+
+	return strings.TrimSuffix(result.String(), "\n"), nil
+}
+
+// diffTreeAgainstEmpty 将文件树与空树对比，用于初始提交的 diff
+func (g *GitWrapper) diffTreeAgainstEmpty(tree *object.Tree) (string, error) {
+	var result strings.Builder
+
+	err := tree.Files().ForEach(func(file *object.File) error {
+		result.WriteString(fmt.Sprintf("--- /dev/null\n+++ b/%s\n", file.Name))
+
+		content, err := file.Contents()
+		if err != nil {
+			result.WriteString(fmt.Sprintf("（无法读取文件内容: %s）\n", err))
+			return nil
+		}
+
+		for _, line := range strings.Split(content, "\n") {
+			result.WriteString("+")
+			result.WriteString(line)
+			result.WriteString("\n")
+		}
+		result.WriteString("\n")
+		return nil
+	})
+
+	return strings.TrimSuffix(result.String(), "\n"), err
+}
+
 // diffDeletedFile 生成已删除文件的差异（所有行都是删除）
 func (g *GitWrapper) diffDeletedFile(commitTree *object.Tree, filePath string) (string, error) {
 	entry, err := commitTree.FindEntry(filePath)
