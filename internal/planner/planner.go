@@ -157,7 +157,7 @@ func (p *Planner) CreatePlan(intent *interpreter.UserIntent) (*Plan, error) {
 func (p *Planner) planSaveVersion(intent *interpreter.UserIntent) []*Step {
 	message := intent.Params["message"]
 	if message == "" {
-		message = "保存修改"
+		message = "chore: save changes"
 	}
 
 	file := intent.Params["file"]

@@ -183,7 +183,7 @@ func NewWithLLM(repoPath string, userConfig *UserConfig, llmConfig *LLMConfig) (
 func (a *Agent) registerToolExecutors() {
 	// save_version
 	a.toolRegistry.Register("save_version", func(ctx context.Context, params map[string]interface{}) (string, error) {
-		message := toString(params["message"], "保存修改")
+		message := toString(params["message"], "chore: save changes")
 		files := toString(params["files"], "")
 		if files != "" {
 			result, err := a.gitWrapper.SaveVersion(message, strings.Split(files, ","), a.userConfig.Name, a.userConfig.Email)
@@ -229,7 +229,7 @@ func (a *Agent) registerToolExecutors() {
 
 	// submit_change
 	a.toolRegistry.Register("submit_change", func(ctx context.Context, params map[string]interface{}) (string, error) {
-		message := toString(params["message"], "提交团队审核")
+		message := toString(params["message"], "chore: submit changes to team")
 		if err := a.gitWrapper.AddAll(); err != nil {
 			return "", err
 		}
@@ -739,7 +739,7 @@ func (a *Agent) executeStep(step *planner.Step) (interface{}, error) {
 	case planner.StepGitCommit:
 		message := step.Params["message"]
 		if message == "" {
-			message = "保存修改"
+			message = "chore: save changes"
 		}
 		hash, err := a.gitWrapper.Commit(message, a.userConfig.Name, a.userConfig.Email)
 		if err != nil {

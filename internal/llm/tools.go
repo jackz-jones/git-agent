@@ -18,7 +18,7 @@ var AllGitAgentTools = []GitAgentTool{
 			"properties": map[string]any{
 				"message": map[string]any{
 					"type":        "string",
-					"description": "版本描述，例如：更新了市场分析报告",
+					"description": "Commit message in English. Summarize the main purpose of ALL file changes, with brief details. Use conventional commit style, e.g.: 'feat: add Ollama LLM support and update docs', 'fix: resolve merge conflict detection in Diff method'",
 				},
 				"files": map[string]any{
 					"type":        "string",
@@ -95,7 +95,7 @@ var AllGitAgentTools = []GitAgentTool{
 			"properties": map[string]any{
 				"message": map[string]any{
 					"type":        "string",
-					"description": "提交描述，说明修改了什么",
+					"description": "Commit message in English. Summarize the main purpose of ALL file changes, with brief details. Use conventional commit style, e.g.: 'feat: add team collaboration workflow', 'fix: resolve push timeout issue'",
 				},
 			},
 			"required": []string{"message"},
