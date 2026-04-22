@@ -484,6 +484,72 @@ Push your changes to the remote repository so team members can see them.
 ✅ Synced to remote repository
 ```
 
+#### Authentication for Remote Push
+
+When pushing to a remote repository for the first time, you may need to authenticate. Git Agent supports two protocols, each with a different authentication method:
+
+| Protocol | URL Format | Authentication Method | Best For |
+|----------|-----------|----------------------|----------|
+| **HTTPS** | `https://github.com/user/repo.git` | Username + Access Token | Beginners (recommended) |
+| **SSH** | `git@github.com:user/repo.git` | SSH Key | Experienced users |
+
+> 💡 **For new repositories, we recommend using HTTPS + Access Token** — it's the simplest setup for beginners.
+
+**HTTPS Authentication (Recommended for Beginners):**
+
+If push fails with an authentication error, Git Agent will guide you through getting an access token. Here's how it works:
+
+1. **Git Agent detects auth failure** and prompts you with clear instructions
+2. **You get an access token** from your Git hosting platform (e.g., GitHub)
+3. **You tell Git Agent your username and token** in natural language
+4. **Git Agent retries the push** with your credentials
+
+**How to get a GitHub Personal Access Token:**
+
+1. Log in to GitHub → Click your avatar (top right) → **Settings**
+2. Scroll down → **Developer settings** → **Personal access tokens** → **Tokens (classic)**
+3. Click **Generate new token (classic)**
+4. Give it a description, check the **repo** scope, and click **Generate token**
+5. **Copy the token** (you won't be able to see it again!)
+
+Then tell Git Agent:
+
+```
+🧠 What would you like to do? My username is jackz-jones and my token is ghp_xxxxx
+
+✅ Pushed successfully with your credentials!
+```
+
+**Switching from SSH to HTTPS:**
+
+If your repository was cloned with SSH and you're having trouble with SSH keys, you can switch to HTTPS:
+
+```
+🧠 What would you like to do? Push to remote, use HTTPS address https://github.com/jackz-jones/my-project.git, username jackz-jones, token ghp_xxxxx
+
+✅ Remote URL switched to HTTPS and pushed successfully!
+```
+
+**SSH Authentication (For Experienced Users):**
+
+Git Agent automatically tries to use your SSH keys in this order:
+
+1. **SSH config `IdentityFile`** — If you've configured `~/.ssh/config` with an `IdentityFile` for the host
+2. **SSH Agent** — If you've loaded keys into ssh-agent (`ssh-add ~/.ssh/id_rsa`)
+3. **Default key files** — `~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, `~/.ssh/id_ecdsa`
+
+If all SSH authentication methods fail, Git Agent will suggest switching to HTTPS (easier for most users).
+
+**Environment Variables for HTTPS Credentials:**
+
+You can also set credentials via environment variables to avoid entering them each time:
+
+```bash
+export GIT_HTTP_USERNAME=your-username
+export GIT_HTTP_PASSWORD=ghp_your-token
+go run main.go
+```
+
 > ⚠️ **Prerequisite**: You need to configure the remote repository URL first. For new repositories, you also need to "push" once.
 
 ---
@@ -895,6 +961,36 @@ Just tell me what you'd like to do in natural language!
 
 ---
 
+### Q10: Push failed with authentication error — what should I do?
+
+**Answer**: This means the remote repository requires authentication. Git Agent will guide you through the process. Here are the two scenarios:
+
+**Scenario A: Your remote uses HTTPS (URL starts with `https://`)**
+
+Git Agent will prompt you to provide a username and access token. Just tell it in natural language:
+
+```
+🧠 What would you like to do? Push with username jackz-jones and token ghp_xxxxx
+```
+
+To get a GitHub Personal Access Token: Login → Avatar → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token → Check "repo" scope → Generate → Copy token.
+
+**Scenario B: Your remote uses SSH (URL starts with `git@`)**
+
+If SSH authentication fails, Git Agent will suggest switching to HTTPS, which is easier:
+
+```
+🧠 What would you like to do? Push using HTTPS address https://github.com/user/repo.git, username jackz-jones, token ghp_xxxxx
+```
+
+Or if you prefer to fix SSH, make sure:
+1. Your SSH key is loaded: `ssh-add ~/.ssh/id_rsa`
+2. Your `~/.ssh/config` has the correct `IdentityFile` for the host
+
+> 💡 **For beginners**, we recommend switching to HTTPS — it's much simpler!
+
+---
+
 ## 11. Quick Reference
 
 ### Version Management
@@ -957,6 +1053,8 @@ Just tell me what you'd like to do in natural language!
 | `GIT_AGENT_MAX_TOKENS` | Max Tokens | `4096` | `8192` |
 | `GIT_AGENT_USER` | Username | `default_user` | `Alex` |
 | `GIT_AGENT_EMAIL` | User Email | `user@git-agent.dev` | `alex@company.com` |
+| `GIT_HTTP_USERNAME` | HTTPS Git Username (for push auth) | None | `jackz-jones` |
+| `GIT_HTTP_PASSWORD` | HTTPS Git Password/Token (for push auth) | None | `ghp_xxxxx` |
 
 ---
 

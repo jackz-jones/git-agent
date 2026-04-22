@@ -484,6 +484,72 @@ go run main.go
 ✅ 已同步到远程仓库
 ```
 
+#### 推送远程仓库的认证方式
+
+首次推送到远程仓库时，可能需要进行身份认证。Git Agent 支持两种协议，认证方式不同：
+
+| 协议 | 地址格式 | 认证方式 | 适合人群 |
+|------|---------|---------|---------|
+| **HTTPS** | `https://github.com/用户名/仓库名.git` | 用户名 + 访问令牌 | 新手（推荐） |
+| **SSH** | `git@github.com:用户名/仓库名.git` | SSH 密钥 | 有经验的用户 |
+
+> 💡 **新建仓库推荐使用 HTTPS + 访问令牌**，对新手最友好。
+
+**HTTPS 认证（推荐新手使用）：**
+
+如果推送时遇到认证失败的提示，Git Agent 会引导您获取访问令牌。流程如下：
+
+1. **Git Agent 检测到认证失败**，会用通俗语言提示您
+2. **您去获取访问令牌**（从 GitHub 等平台）
+3. **用自然语言告诉 Git Agent 用户名和令牌**
+4. **Git Agent 自动用您的凭据重新推送**
+
+**如何获取 GitHub 访问令牌：**
+
+1. 登录 GitHub → 点击右上角头像 → **Settings**
+2. 下拉找到 → **Developer settings** → **Personal access tokens** → **Tokens (classic)**
+3. 点击 **Generate new token (classic)**
+4. 填写描述，勾选 **repo** 权限，点击 **Generate token**
+5. **复制令牌**（只显示一次，请妥善保存！）
+
+然后告诉 Git Agent：
+
+```
+🧠 您想做什么？ 我的用户名是 jackz-jones，令牌是 ghp_xxxxx
+
+✅ 使用您的凭据推送成功！
+```
+
+**从 SSH 切换到 HTTPS：**
+
+如果您的仓库是用 SSH 方式克隆的，但 SSH 密钥配置有问题，可以切换到 HTTPS：
+
+```
+🧠 您想做什么？ 推送到远程，使用 HTTPS 地址 https://github.com/jackz-jones/my-project.git，用户名 jackz-jones，令牌 ghp_xxxxx
+
+✅ 远程地址已切换为 HTTPS 并推送成功！
+```
+
+**SSH 认证（适合有经验的用户）：**
+
+Git Agent 会按以下顺序自动尝试使用您的 SSH 密钥：
+
+1. **SSH 配置中的 IdentityFile** — 如果您在 `~/.ssh/config` 中为主机配置了 `IdentityFile`
+2. **SSH Agent** — 如果您已将密钥加载到 ssh-agent（`ssh-add ~/.ssh/id_rsa`）
+3. **默认密钥文件** — `~/.ssh/id_ed25519`、`~/.ssh/id_rsa`、`~/.ssh/id_ecdsa`
+
+如果所有 SSH 认证方式都失败，Git Agent 会建议您切换到 HTTPS 方式（对大多数用户更简单）。
+
+**通过环境变量设置 HTTPS 凭据：**
+
+您也可以通过环境变量预设凭据，避免每次都输入：
+
+```bash
+export GIT_HTTP_USERNAME=你的用户名
+export GIT_HTTP_PASSWORD=ghp_你的令牌
+go run main.go
+```
+
 > ⚠️ **前提**：需要先配置远程仓库地址。如果是新仓库，还需要先"推送"一次。
 
 ---
@@ -897,6 +963,36 @@ go run main.go --api-key ollama --base-url http://localhost:11434/v1 --model qwe
 
 ---
 
+### Q10：推送时提示认证失败怎么办？
+
+**答**：这说明远程仓库需要身份验证。Git Agent 会引导您完成认证。分两种情况：
+
+**情况 A：远程仓库使用 HTTPS（地址以 `https://` 开头）**
+
+Git Agent 会提示您提供用户名和访问令牌，用自然语言告诉它即可：
+
+```
+🧠 您想做什么？ 推送，用户名 jackz-jones，令牌 ghp_xxxxx
+```
+
+获取 GitHub 访问令牌的步骤：登录 → 右上角头像 → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token → 勾选 repo 权限 → 生成 → 复制令牌。
+
+**情况 B：远程仓库使用 SSH（地址以 `git@` 开头）**
+
+如果 SSH 认证失败，Git Agent 会建议您切换到 HTTPS 方式，更简单：
+
+```
+🧠 您想做什么？ 推送，用 HTTPS 地址 https://github.com/用户名/仓库名.git，用户名 jackz-jones，令牌 ghp_xxxxx
+```
+
+如果您想修复 SSH，请确保：
+1. SSH 密钥已加载：`ssh-add ~/.ssh/id_rsa`
+2. `~/.ssh/config` 中配置了正确的 `IdentityFile`
+
+> 💡 **新手建议**：切换到 HTTPS 方式最简单！
+
+---
+
 ## 11. 所有操作速查表
 
 ### 版本管理
@@ -959,6 +1055,8 @@ go run main.go --api-key ollama --base-url http://localhost:11434/v1 --model qwe
 | `GIT_AGENT_MAX_TOKENS` | 最大 Token 数 | `4096` | `8192` |
 | `GIT_AGENT_USER` | 用户名 | `default_user` | `张三` |
 | `GIT_AGENT_EMAIL` | 用户邮箱 | `user@git-agent.dev` | `zhangsan@company.com` |
+| `GIT_HTTP_USERNAME` | HTTPS Git 用户名（推送认证用） | 无 | `jackz-jones` |
+| `GIT_HTTP_PASSWORD` | HTTPS Git 密码/令牌（推送认证用） | 无 | `ghp_xxxxx` |
 
 ---
 

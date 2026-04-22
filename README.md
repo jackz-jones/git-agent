@@ -20,6 +20,7 @@ The project supports **dual-mode operation**:
 3. **Scenario-Driven Design** — Built around office scenarios (research reports, proposal documents, data files)
 4. **Intelligent Conflict Handling** — Automatically detects and assists in resolving merge conflicts
 5. **Graceful Degradation** — Falls back to local mode automatically when LLM is unavailable
+6. **Smart Authentication Strategy** — New repos default to HTTPS + Token (beginner-friendly); existing repos preserve user's configured auth method; SSH auth auto-discovers `~/.ssh/config` IdentityFile
 
 ## Architecture
 
@@ -374,6 +375,8 @@ A comprehensive wrapper built on [go-git](https://github.com/go-git/go-git), pro
 | `GetDiff()` | View changes | `diff` |
 | `GetStatus()` | Check current status | `status` |
 | `SubmitChange()` | Submit to team | `push` |
+| `PushWithAuth()` | Push with HTTPS authentication (username + token) | `push` with auth |
+| `SetRemoteURL()` | Switch remote URL (e.g., SSH → HTTPS) | `remote set-url` |
 | `GetTeamChange()` | View others' changes | `log --author` |
 | `CreateBranch()` | Create a new work branch | `branch` |
 | `SwitchBranch()` | Switch work branch | `checkout` |
@@ -555,6 +558,8 @@ Build time: 2026-04-22 10:00:00
 | `GIT_AGENT_MAX_TOKENS` | Max token limit | `4096` |
 | `GIT_AGENT_USER` | Username | `default_user` |
 | `GIT_AGENT_EMAIL` | User email | `user@git-agent.dev` |
+| `GIT_HTTP_USERNAME` | HTTPS Git username (for push auth) | — |
+| `GIT_HTTP_PASSWORD` | HTTPS Git password/token (for push auth) | — |
 
 ### Interactive Mode Commands
 

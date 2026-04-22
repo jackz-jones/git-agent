@@ -20,6 +20,7 @@ Git Agent 是一个用 Go 语言实现的 **自然语言驱动的文件版本管
 3. **场景化操作** — 基于办公场景（研究报告、方案文档、数据文件）设计交互
 4. **智能冲突处理** — 自动检测并协助解决多人编辑冲突
 5. **优雅降级** — LLM 不可用时自动回退到本地模式
+6. **智能认证策略** — 新仓库默认 HTTPS + 令牌（对新手友好）；已有仓库保持用户已配置的认证方式；SSH 认证自动读取 `~/.ssh/config` 中的 IdentityFile
 
 ## 架构设计
 
@@ -374,6 +375,8 @@ git-agent/
 | `GetDiff()` | 查看改动内容 | `diff` |
 | `GetStatus()` | 查看当前状态 | `status` |
 | `SubmitChange()` | 提交给团队 | `push` |
+| `PushWithAuth()` | 使用 HTTPS 认证推送（用户名+令牌） | `push` with auth |
+| `SetRemoteURL()` | 切换远程仓库地址（如 SSH → HTTPS） | `remote set-url` |
 | `GetTeamChange()` | 查看他人修改 | `log --author` |
 | `CreateBranch()` | 新建工作分支 | `branch` |
 | `SwitchBranch()` | 切换工作分支 | `checkout` |
@@ -553,6 +556,8 @@ Commit: abc1234
 | `GIT_AGENT_MAX_TOKENS` | 最大 token 数 | `4096` |
 | `GIT_AGENT_USER` | 用户名 | `default_user` |
 | `GIT_AGENT_EMAIL` | 用户邮箱 | `user@git-agent.dev` |
+| `GIT_HTTP_USERNAME` | HTTPS Git 用户名（推送认证用） | — |
+| `GIT_HTTP_PASSWORD` | HTTPS Git 密码/令牌（推送认证用） | — |
 
 ### 交互模式命令
 

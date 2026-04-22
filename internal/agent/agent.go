@@ -314,9 +314,27 @@ func (a *Agent) registerToolExecutors() {
 		remote := toString(params["remote"], "origin")
 		username := toString(params["username"], "")
 		password := toString(params["password"], "")
+		remoteURL := toString(params["remote_url"], "")
 
-		// 如果提供了认证信息，使用 PushWithAuth
+		// 如果提供了新的远程 URL（通常是 HTTPS 地址），先切换远程地址
+		if remoteURL != "" {
+			if err := a.gitWrapper.SetRemoteURL(remote, remoteURL); err != nil {
+				return "", fmt.Errorf("切换远程仓库地址失败: %w", err)
+			}
+		}
+
+		// 如果提供了认证信息，先检测远程 URL 协议
 		if username != "" && password != "" {
+			// 检测远程 URL 是否为 SSH 协议
+			if a.gitWrapper.IsRemoteSSH(remote) {
+				currentURL, _ := a.gitWrapper.GetRemoteURL(remote)
+				// SSH 远程仓库不支持用户名/令牌认证
+				return "", &gitwrapper.AuthError{
+					RemoteURL: currentURL,
+					AuthType:  "ssh",
+					Cause:     fmt.Errorf("当前远程仓库使用 SSH 协议，不支持用户名/令牌认证"),
+				}
+			}
 			err := a.gitWrapper.PushWithAuth(remote, username, password)
 			if err != nil {
 				return "", err
@@ -616,7 +634,11 @@ func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.T
 			// 对 AuthError 提供友好提示，引导 LLM 给出非技术性的建议
 			var authErr *gitwrapper.AuthError
 			if errors.As(err, &authErr) {
-				result = "推送失败：远程仓库需要身份验证，但当前没有配置有效的认证方式。请用通俗语言告诉用户推送失败了，建议他们联系技术同事帮忙配置访问权限，或者提供用户名和访问令牌来重试。不要提及 SSH、密钥、公钥等技术术语，不要建议执行任何命令行操作。"
+				if authErr.AuthType == "ssh" {
+					result = "推送失败：当前远程仓库使用 SSH 协议连接，但 SSH 密钥认证未成功。请用通俗语言告诉用户推送失败了，并提供以下两种解决方案（让用户选择）：方案一（推荐，更简单）：将远程仓库地址改为 HTTPS 格式，然后使用访问令牌认证。步骤：1) 说明需要改为 HTTPS 地址；2) 以 GitHub 为例，HTTPS 地址格式为 https://github.com/用户名/仓库名.git；3) 引导用户获取访问令牌（登录 GitHub → 右上角头像 → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token，勾选 repo 权限）；4) 提示用户告诉我 HTTPS 地址、用户名和令牌，我会重新推送。方案二：配置 SSH 密钥。建议联系技术同事帮忙配置。注意：不要建议执行命令行操作，不要提及技术术语。"
+				} else {
+					result = "推送失败：远程仓库需要身份验证，但当前没有配置有效的认证方式。请用通俗语言告诉用户推送失败了，然后引导用户获取访问令牌来重试，步骤如下：1) 说明需要身份验证；2) 简要说明获取访问令牌的步骤（以 GitHub 为例：登录 GitHub → 右上角头像 → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token，勾选 repo 权限，生成并复制令牌）；3) 提示用户告诉我用户名和令牌，我会用它们重新推送；4) 如果用户不想自己操作，建议联系技术同事帮忙。注意：不要提及 SSH、密钥等技术术语，不要建议执行命令行操作。"
+				}
 			} else {
 				result = fmt.Sprintf("操作失败：%s", translateError(err))
 			}
@@ -728,13 +750,13 @@ func (a *Agent) processLocal(ctx context.Context, input string) *AgentResponse {
 			a.setState(StateError)
 			return &AgentResponse{
 				Success: false,
-				Message: "抱歉，推送失败了！远程仓库需要身份验证，但当前没有配置有效的认证方式。",
+				Message: "抱歉，推送失败了！远程仓库需要身份验证，但当前还没有配置有效的认证方式。",
 				Details: err.Error(),
 				State:   StateError,
 				Suggestions: []string{
-					"请联系您的技术同事，帮忙配置 SSH 密钥或访问令牌",
-					"如果您有 GitHub 账号，可以告诉同事您需要：1）在电脑上生成 SSH 密钥；2）把公钥添加到 GitHub",
-					"也可以尝试提供用户名和访问令牌来推送",
+					"获取 GitHub 访问令牌：登录 GitHub → 右上角头像 → Settings → Developer settings → Personal access tokens → Generate new token（勾选 repo 权限）",
+					"获取令牌后，告诉我用户名和令牌，我就可以帮您重新推送",
+					"如果不想自己操作，可以联系技术同事帮忙配置访问权限",
 				},
 				Timestamp: time.Now(),
 			}

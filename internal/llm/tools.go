@@ -197,7 +197,7 @@ var AllGitAgentTools = []GitAgentTool{
 	},
 	{
 		Name:        "push_to_remote",
-		Description: "将本地修改推送到远程仓库，同步给团队。如果推送失败提示认证问题，可以提供 username 和 password 参数重试。",
+		Description: "将本地修改推送到远程仓库，同步给团队。认证方式取决于远程仓库协议：HTTPS 仓库使用用户名+访问令牌认证，SSH 仓库自动使用本地 SSH 密钥。如果 SSH 认证失败，可以通过 remote_url 参数将远程地址切换为 HTTPS 格式再使用令牌认证。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -207,11 +207,15 @@ var AllGitAgentTools = []GitAgentTool{
 				},
 				"username": map[string]any{
 					"type":        "string",
-					"description": "认证用户名（推送失败需要认证时使用，如 GitHub 用户名）",
+					"description": "HTTPS 认证用户名（仅在 HTTPS 远程仓库认证失败后用户提供，如 GitHub 用户名）",
 				},
 				"password": map[string]any{
 					"type":        "string",
-					"description": "认证密码或访问令牌（推送失败需要认证时使用，如 GitHub Personal Access Token）",
+					"description": "HTTPS 认证密码或访问令牌（仅在 HTTPS 远程仓库认证失败后用户提供，如 GitHub Personal Access Token）",
+				},
+				"remote_url": map[string]any{
+					"type":        "string",
+					"description": "新的远程仓库 HTTPS 地址（当 SSH 认证失败时，用户可提供 HTTPS 地址切换协议，如 https://github.com/用户名/仓库名.git）",
 				},
 			},
 		},

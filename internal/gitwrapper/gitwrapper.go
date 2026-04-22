@@ -16,6 +16,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
+	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/utils/merkletrie"
 )
 
@@ -1091,7 +1092,8 @@ func (g *GitWrapper) Push(remote string) error {
 	return nil
 }
 
-// PushWithAuth 使用认证推送（HTTPS 方式，需要用户名和密码/令牌）
+// PushWithAuth 使用认证推送（仅限 HTTPS 方式，需要用户名和密码/令牌）
+// 如果远程仓库是 SSH 协议，将返回友好错误提示用户改用 HTTPS 或配置 SSH 密钥
 func (g *GitWrapper) PushWithAuth(remote, username, password string) error {
 	if err := g.ensureRepo(); err != nil {
 		return err
@@ -1100,6 +1102,16 @@ func (g *GitWrapper) PushWithAuth(remote, username, password string) error {
 	remoteObj, err := g.repo.Remote(remote)
 	if err != nil {
 		return fmt.Errorf("找不到远程仓库 %s: %w", remote, err)
+	}
+
+	// 检测远程 URL 协议：SSH URL 不支持 HTTP Basic Auth
+	config := remoteObj.Config()
+	if config != nil && len(config.URLs) > 0 && isSSHURL(config.URLs[0]) {
+		return &AuthError{
+			RemoteURL: config.URLs[0],
+			AuthType:  "ssh",
+			Cause:     fmt.Errorf("当前远程仓库使用 SSH 协议，不支持用户名/令牌认证。请改用 HTTPS 地址或配置 SSH 密钥"),
+		}
 	}
 
 	err = remoteObj.Push(&git.PushOptions{
@@ -1133,6 +1145,46 @@ func (g *GitWrapper) GetRemoteURL(remote string) (string, error) {
 	}
 
 	return config.URLs[0], nil
+}
+
+// SetRemoteURL 设置远程仓库的 URL（可用于将 SSH 地址切换为 HTTPS 地址）
+func (g *GitWrapper) SetRemoteURL(remote, url string) error {
+	if err := g.ensureRepo(); err != nil {
+		return err
+	}
+
+	_, err := g.repo.CreateRemote(&gitconfig.RemoteConfig{
+		Name: remote,
+		URLs: []string{url},
+	})
+	if err != nil {
+		// 远程已存在，删除后重新创建
+		if strings.Contains(err.Error(), "already exists") {
+			_ = g.repo.DeleteRemote(remote)
+			_, err = g.repo.CreateRemote(&gitconfig.RemoteConfig{
+				Name: remote,
+				URLs: []string{url},
+			})
+		}
+		if err != nil {
+			return fmt.Errorf("设置远程仓库地址失败: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// IsRemoteSSH 检查指定远程仓库是否使用 SSH 协议
+func (g *GitWrapper) IsRemoteSSH(remote string) bool {
+	remoteObj, err := g.repo.Remote(remote)
+	if err != nil {
+		return false
+	}
+	config := remoteObj.Config()
+	if config == nil || len(config.URLs) == 0 {
+		return false
+	}
+	return isSSHURL(config.URLs[0])
 }
 
 // isSSHURL 判断 URL 是否为 SSH 格式
@@ -1170,15 +1222,26 @@ func (g *GitWrapper) getAuthForRemote(remoteObj *git.Remote) (transport.AuthMeth
 		return nil, nil
 	}
 
-	// SSH 远程仓库：尝试 SSH Agent 或默认密钥
+	// SSH 远程仓库：尝试多种认证方式
 	if isSSHURL(url) {
-		// 优先尝试 SSH Agent（用户已加载密钥到 agent）
+		// 提取主机名，用于匹配 ~/.ssh/config
+		host := extractSSHHost(url)
+
+		// 1. 优先尝试 ~/.ssh/config 中配置的 IdentityFile
+		if identityFile := getIdentityFileFromSSHConfig(host); identityFile != "" {
+			auth, err := ssh.NewPublicKeysFromFile("git", identityFile, "")
+			if err == nil {
+				return auth, nil
+			}
+		}
+
+		// 2. 尝试 SSH Agent（用户已加载密钥到 agent）
 		auth, err := ssh.NewSSHAgentAuth("git")
 		if err == nil {
 			return auth, nil
 		}
 
-		// 尝试默认的 SSH 密钥文件
+		// 3. 尝试默认的 SSH 密钥文件
 		homeDir, err := os.UserHomeDir()
 		if err == nil {
 			for _, keyFile := range []string{"id_ed25519", "id_rsa", "id_ecdsa"} {
@@ -1201,6 +1264,157 @@ func (g *GitWrapper) getAuthForRemote(remoteObj *git.Remote) (transport.AuthMeth
 	}
 
 	return nil, nil
+}
+
+// extractSSHHost 从 SSH URL 中提取主机名
+// 例如 git@github.com:user/repo.git -> github.com
+// ssh://git@github.com/user/repo.git -> github.com
+func extractSSHHost(url string) string {
+	if strings.HasPrefix(url, "ssh://") {
+		// ssh://git@github.com/user/repo.git
+		rest := strings.TrimPrefix(url, "ssh://")
+		if atIdx := strings.Index(rest, "@"); atIdx >= 0 {
+			rest = rest[atIdx+1:]
+		}
+		if slashIdx := strings.Index(rest, "/"); slashIdx >= 0 {
+			return rest[:slashIdx]
+		}
+		// 可能包含端口
+		if colonIdx := strings.Index(rest, ":"); colonIdx >= 0 {
+			return rest[:colonIdx]
+		}
+		return rest
+	}
+	// git@github.com:user/repo.git
+	if atIdx := strings.Index(url, "@"); atIdx >= 0 {
+		rest := url[atIdx+1:]
+		if colonIdx := strings.Index(rest, ":"); colonIdx >= 0 {
+			return rest[:colonIdx]
+		}
+	}
+	return ""
+}
+
+// getIdentityFileFromSSHConfig 从 ~/.ssh/config 中查找指定主机的 IdentityFile
+func getIdentityFileFromSSHConfig(host string) string {
+	if host == "" {
+		return ""
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	configPath := filepath.Join(homeDir, ".ssh", "config")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+
+	return parseSSHConfigIdentityFile(string(data), host)
+}
+
+// parseSSHConfigIdentityFile 解析 ~/.ssh/config 内容，查找匹配主机的 IdentityFile
+// 支持多 Host 块匹配，支持 Host 别名（如 github.com-xxx）映射到实际 Hostname
+func parseSSHConfigIdentityFile(content, targetHost string) string {
+	lines := strings.Split(content, "\n")
+
+	type hostBlock struct {
+		patterns      []string // Host 指令的模式列表
+		hostname      string
+		identityFile  string
+	}
+
+	var blocks []*hostBlock
+	var current *hostBlock
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+
+		key := strings.ToLower(parts[0])
+		value := strings.Join(parts[1:], " ")
+
+		if key == "host" {
+			current = &hostBlock{
+				patterns: strings.Fields(value),
+			}
+			blocks = append(blocks, current)
+			continue
+		}
+
+		if current == nil {
+			continue
+		}
+
+		switch key {
+		case "hostname":
+			current.hostname = value
+		case "identityfile":
+			// 展开 ~ 为 home 目录
+			if strings.HasPrefix(value, "~") {
+				homeDir, _ := os.UserHomeDir()
+				value = filepath.Join(homeDir, value[1:])
+			}
+			current.identityFile = value
+		}
+	}
+
+	// 两轮匹配：
+	// 1. 先按 Host 别名匹配（如 Host github.com-jackz-jones）
+	// 2. 再按 Hostname 匹配（如 Hostname github.com）
+	// 如果 Host 别名匹配到了且有 IdentityFile，优先使用
+
+	// 第一轮：Host 模式直接匹配目标主机名
+	for _, block := range blocks {
+		for _, pattern := range block.patterns {
+			if matchSSHHostPattern(pattern, targetHost) {
+				// 检查这个 block 的 Hostname 是否也匹配（如果有 Hostname 配置）
+				if block.hostname != "" && block.hostname != targetHost {
+					// Host 别名匹配但 Hostname 指向不同主机，跳过
+					continue
+				}
+				if block.identityFile != "" {
+					return block.identityFile
+				}
+			}
+		}
+	}
+
+	// 第二轮：按 Hostname 字段匹配目标主机名
+	for _, block := range blocks {
+		if block.hostname == targetHost {
+			if block.identityFile != "" {
+				return block.identityFile
+			}
+		}
+	}
+
+	return ""
+}
+
+// matchSSHHostPattern 匹配 SSH config 的 Host 模式
+// 支持 * 通配符，如 github.com-* 匹配 github.com-anything
+func matchSSHHostPattern(pattern, host string) bool {
+	if pattern == host {
+		return true
+	}
+	if strings.Contains(pattern, "*") {
+		// 简单的通配符匹配
+		parts := strings.Split(pattern, "*")
+		if len(parts) == 2 {
+			return strings.HasPrefix(host, parts[0]) && strings.HasSuffix(host, parts[1])
+		}
+	}
+	return false
 }
 
 // AuthError 认证错误（用于提供友好的错误信息）
@@ -1235,13 +1449,14 @@ func classifyPushError(err error, remote string) error {
 		}
 	}
 
-	// HTTPS 认证失败
+	// HTTPS 认证失败 / 认证方式不匹配
 	if containsAnyLower(msg,
 		"authorization failed",
 		"access denied",
 		"403",
 		"credentials",
 		"authentication required",
+		"invalid auth method",
 	) {
 		return &AuthError{
 			RemoteURL: remote,
