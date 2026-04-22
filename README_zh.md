@@ -554,8 +554,8 @@ Commit: abc1234
 | `GIT_AGENT_BASE_URL` | LLM API 地址 | `https://api.openai.com/v1` |
 | `GIT_AGENT_MODEL` | LLM 模型名称 | `gpt-4o` |
 | `GIT_AGENT_MAX_TOKENS` | 最大 token 数 | `4096` |
-| `GIT_AGENT_USER` | 用户名 | `default_user` |
-| `GIT_AGENT_EMAIL` | 用户邮箱 | `user@git-agent.dev` |
+| `GIT_AGENT_USER` | 用户名（**必填**） | — |
+| `GIT_AGENT_EMAIL` | 用户邮箱（**必填**） | — |
 | `GIT_HTTP_USERNAME` | HTTPS Git 用户名（推送认证用） | — |
 | `GIT_HTTP_PASSWORD` | HTTPS Git 密码/令牌（推送认证用） | — |
 

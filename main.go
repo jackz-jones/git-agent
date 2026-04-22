@@ -92,10 +92,24 @@ func runInteractive(repoPath, apiKey, baseURL, model string) {
 
 	// 用户配置
 	userConfig := &agent.UserConfig{
-		Name:     getEnvOrDefault("GIT_AGENT_USER", "默认用户"),
-		Email:    getEnvOrDefault("GIT_AGENT_EMAIL", "user@git-agent.dev"),
+		Name:     os.Getenv("GIT_AGENT_USER"),
+		Email:    os.Getenv("GIT_AGENT_EMAIL"),
 		Role:     "editor",
 		Language: "zh",
+	}
+
+	// 检查用户信息是否已配置
+	if userConfig.Name == "" || userConfig.Email == "" {
+		fmt.Println("⚠️  您还未配置用户信息，提交记录将无法标识您的身份。")
+		fmt.Println("   请通过环境变量设置：")
+		if userConfig.Name == "" {
+			fmt.Println("   export GIT_AGENT_USER=你的名字")
+		}
+		if userConfig.Email == "" {
+			fmt.Println("   export GIT_AGENT_EMAIL=你的邮箱")
+		}
+		fmt.Println("   或者在交互中告诉我您的名字和邮箱，我会帮您设置。")
+		fmt.Println()
 	}
 
 	// 创建 Agent
@@ -290,8 +304,8 @@ func printHelp() {
 	fmt.Println("  GIT_AGENT_BASE_URL      LLM API Base URL")
 	fmt.Println("  GIT_AGENT_MODEL         LLM 模型名称")
 	fmt.Println("  GIT_AGENT_MAX_TOKENS    最大 token 数（默认 4096）")
-	fmt.Println("  GIT_AGENT_USER          用户名")
-	fmt.Println("  GIT_AGENT_EMAIL         用户邮箱")
+	fmt.Println("  GIT_AGENT_USER          用户名（必填）")
+	fmt.Println("  GIT_AGENT_EMAIL         用户邮箱（必填）")
 	fmt.Println()
 	fmt.Println("交互模式命令：")
 	fmt.Println("  /mode local   切换到本地模式")

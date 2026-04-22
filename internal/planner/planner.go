@@ -26,6 +26,7 @@ const (
 	StepConflictResolve StepType = "conflict_resolve"
 	StepRepoCreate      StepType = "repo_create"
 	StepRepoClone       StepType = "repo_clone"
+	StepUpdateUserInfo  StepType = "update_user_info"
 )
 
 // Step 表示执行计划中的一个步骤
@@ -141,6 +142,8 @@ func (p *Planner) CreatePlan(intent *interpreter.UserIntent) (*Plan, error) {
 		plan.Steps = p.planPull(intent)
 	case interpreter.IntentDetectConflict:
 		plan.Steps = p.planDetectConflict(intent)
+	case interpreter.IntentUpdateUserInfo:
+		plan.Steps = p.planUpdateUserInfo(intent)
 	case interpreter.IntentHelp:
 		// 帮助不需要执行步骤
 	default:
@@ -460,6 +463,26 @@ func (p *Planner) planDetectConflict(intent *interpreter.UserIntent) []*Step {
 			Params:   make(map[string]string),
 			Required: true,
 			Desc:     "检测文件冲突",
+		},
+	}
+}
+
+// 更新用户信息
+func (p *Planner) planUpdateUserInfo(intent *interpreter.UserIntent) []*Step {
+	params := make(map[string]string)
+	if name := intent.Params["name"]; name != "" {
+		params["name"] = name
+	}
+	if email := intent.Params["email"]; email != "" {
+		params["email"] = email
+	}
+
+	return []*Step{
+		{
+			Type:     StepUpdateUserInfo,
+			Params:   params,
+			Required: true,
+			Desc:     "更新用户信息",
 		},
 	}
 }

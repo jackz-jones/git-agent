@@ -25,6 +25,7 @@ const (
 	IntentPush           IntentType = "push"            // 推送
 	IntentPull           IntentType = "pull"            // 拉取
 	IntentDetectConflict IntentType = "detect_conflict" // 检测冲突
+	IntentUpdateUserInfo IntentType = "update_user_info" // 更新用户信息
 	IntentHelp           IntentType = "help"            // 帮助
 	IntentUnknown        IntentType = "unknown"         // 未知意图
 )
@@ -187,6 +188,14 @@ func (i *Interpreter) initPatterns() {
 				"查看冲突", "冲突检测", "有没有冲突", "是否冲突"},
 			extractor: extractDetectConflict,
 		},
+		// 更新用户信息
+		{
+			intentType: IntentUpdateUserInfo,
+			keywords: []string{"我的名字", "我叫", "我的邮箱", "设置名字", "设置邮箱",
+				"配置用户", "更新用户信息", "我的用户名", "设置用户信息",
+				"配置名字", "配置邮箱", "改名字", "改邮箱"},
+			extractor: extractUpdateUserInfo,
+		},
 		// 帮助
 		{
 			intentType: IntentHelp,
@@ -340,6 +349,8 @@ func (i *Interpreter) TranslateResult(intent *UserIntent, result interface{}) st
 		return fmt.Sprintf("✅ 已标记版本「%s」", intent.Target)
 	case IntentDetectConflict:
 		return i.translateConflictResult(result)
+	case IntentUpdateUserInfo:
+		return "✅ 已更新您的用户信息"
 	case IntentHelp:
 		return i.translateHelp()
 	default:
@@ -682,6 +693,60 @@ func extractDetectConflict(input string, matches []string) *UserIntent {
 		UserInput: input,
 		Params:      make(map[string]string),
 	}
+}
+
+func extractUpdateUserInfo(input string, matches []string) *UserIntent {
+	intent := &UserIntent{
+		Target:      "",
+		UserInput: input,
+		Params:      make(map[string]string),
+	}
+
+	// 尝试提取邮箱（包含 @ 的部分）
+	parts := strings.Fields(input)
+	for _, p := range parts {
+		if strings.Contains(p, "@") && strings.Contains(p, ".") {
+			intent.Params["email"] = p
+			intent.Target = p
+			break
+		}
+	}
+
+	// 尝试提取名字（"我叫XXX" 或 "我的名字是XXX" 或 "名字XXX"）
+	for _, prefix := range []string{"我叫", "我的名字是", "我的名字", "名字是", "名字", "设置名字", "配置名字", "改名字为"} {
+		if idx := strings.Index(input, prefix); idx >= 0 {
+			remaining := strings.TrimSpace(input[idx+len(prefix):])
+			// 取第一个空格前的部分作为名字
+			if parts := strings.Fields(remaining); len(parts) > 0 {
+				name := parts[0]
+				// 排除邮箱
+				if !strings.Contains(name, "@") {
+					intent.Params["name"] = name
+					if intent.Target == "" {
+						intent.Target = name
+					}
+				}
+			}
+			break
+		}
+	}
+
+	// 尝试提取邮箱（"邮箱是XXX" 或 "我的邮箱XXX"）
+	for _, prefix := range []string{"邮箱是", "我的邮箱是", "我的邮箱", "邮箱", "设置邮箱", "配置邮箱", "改邮箱为"} {
+		if idx := strings.Index(input, prefix); idx >= 0 {
+			remaining := strings.TrimSpace(input[idx+len(prefix):])
+			if parts := strings.Fields(remaining); len(parts) > 0 {
+				email := parts[0]
+				if strings.Contains(email, "@") {
+					intent.Params["email"] = email
+					intent.Target = email
+				}
+			}
+			break
+		}
+	}
+
+	return intent
 }
 
 func extractHelp(input string, matches []string) *UserIntent {

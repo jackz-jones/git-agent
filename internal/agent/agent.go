@@ -105,8 +105,6 @@ func New(repoPath string, userConfig *UserConfig) (*Agent, error) {
 
 	if userConfig == nil {
 		userConfig = &UserConfig{
-			Name:     "默认用户",
-			Email:    "user@git-agent.dev",
 			Role:     "editor",
 			Language: "zh",
 		}
@@ -184,6 +182,9 @@ func NewWithLLM(repoPath string, userConfig *UserConfig, llmConfig *LLMConfig) (
 func (a *Agent) registerToolExecutors() {
 	// save_version
 	a.toolRegistry.Register("save_version", func(ctx context.Context, params map[string]interface{}) (string, error) {
+		if err := a.ensureUserConfig(); err != nil {
+			return "", err
+		}
 		message := toString(params["message"], "chore: save changes")
 		files := toString(params["files"], "")
 		if files != "" {
@@ -230,6 +231,9 @@ func (a *Agent) registerToolExecutors() {
 
 	// submit_change
 	a.toolRegistry.Register("submit_change", func(ctx context.Context, params map[string]interface{}) (string, error) {
+		if err := a.ensureUserConfig(); err != nil {
+			return "", err
+		}
 		message := toString(params["message"], "chore: submit changes to team")
 		if err := a.gitWrapper.AddAll(); err != nil {
 			return "", err
@@ -280,6 +284,20 @@ func (a *Agent) registerToolExecutors() {
 	a.toolRegistry.Register("init_repo", func(ctx context.Context, params map[string]interface{}) (string, error) {
 		err := a.gitWrapper.InitRepo()
 		return toJSONResult(nil, err)
+	})
+
+	// update_user_info
+	a.toolRegistry.Register("update_user_info", func(ctx context.Context, params map[string]interface{}) (string, error) {
+		name := toString(params["name"], "")
+		email := toString(params["email"], "")
+		if name == "" && email == "" {
+			return "", fmt.Errorf("请提供至少一项用户信息（名字或邮箱）")
+		}
+		a.UpdateUserInfo(name, email)
+		return toJSONResult(map[string]string{
+			"name":  a.userConfig.Name,
+			"email": a.userConfig.Email,
+		}, nil)
 	})
 
 	// create_branch
@@ -378,23 +396,24 @@ const maxReActIterations = 5
 // intentToolMapping 意图到工具名称的映射
 // 用于智能筛选发送给 LLM 的工具，避免小模型被过多工具干扰
 var intentToolMapping = map[string][]string{
-	"save_version":    {"save_version", "view_status", "view_diff"},
-	"view_history":    {"view_history", "view_status"},
-	"restore_version": {"restore_version", "view_history", "view_diff"},
-	"view_diff":       {"view_diff", "view_status"},
-	"view_status":     {"view_status", "view_diff", "view_history"},
-	"submit_change":   {"submit_change", "view_status", "push_to_remote"},
+	"save_version":     {"save_version", "view_status", "view_diff", "update_user_info"},
+	"view_history":     {"view_history", "view_status"},
+	"restore_version":  {"restore_version", "view_history", "view_diff"},
+	"view_diff":        {"view_diff", "view_status"},
+	"view_status":      {"view_status", "view_diff", "view_history"},
+	"submit_change":    {"submit_change", "view_status", "push_to_remote", "update_user_info"},
 	"view_team_change": {"view_team_change", "view_history", "view_diff"},
-	"approve_merge":   {"merge_branch", "view_status", "view_diff"},
-	"init_repo":       {"init_repo"},
-	"create_branch":   {"create_branch", "switch_branch", "list_branches"},
-	"switch_branch":   {"switch_branch", "list_branches", "create_branch"},
-	"list_branches":   {"list_branches", "switch_branch"},
-	"create_tag":      {"create_tag", "view_history"},
-	"push":            {"push_to_remote", "view_status"},
-	"pull":            {"pull_from_remote", "view_status", "detect_conflict"},
-	"detect_conflict": {"detect_conflict", "resolve_conflict", "view_status"},
-	"help":            {"view_status", "view_history"},
+	"approve_merge":    {"merge_branch", "view_status", "view_diff"},
+	"init_repo":        {"init_repo"},
+	"create_branch":    {"create_branch", "switch_branch", "list_branches"},
+	"switch_branch":    {"switch_branch", "list_branches", "create_branch"},
+	"list_branches":    {"list_branches", "switch_branch"},
+	"create_tag":       {"create_tag", "view_history"},
+	"push":             {"push_to_remote", "view_status"},
+	"pull":             {"pull_from_remote", "view_status", "detect_conflict"},
+	"detect_conflict":  {"detect_conflict", "resolve_conflict", "view_status"},
+	"help":             {"view_status", "view_history"},
+	"update_user_info": {"update_user_info"},
 }
 
 // selectRelevantTools 根据用户输入智能筛选相关工具
@@ -855,6 +874,9 @@ func (a *Agent) executeStep(step *planner.Step) (interface{}, error) {
 		return nil, a.gitWrapper.AddFiles(splitFiles(files))
 
 	case planner.StepGitCommit:
+		if err := a.ensureUserConfig(); err != nil {
+			return nil, err
+		}
 		message := step.Params["message"]
 		if message == "" {
 			message = "chore: save changes"
@@ -950,6 +972,22 @@ func (a *Agent) executeStep(step *planner.Step) (interface{}, error) {
 		url := step.Params["url"]
 		return a.repoManager.Clone(url)
 
+	case planner.StepUpdateUserInfo:
+		name := step.Params["name"]
+		email := step.Params["email"]
+		if name == "" && email == "" {
+			return nil, fmt.Errorf("请提供用户名或邮箱信息")
+		}
+		a.UpdateUserInfo(name, email)
+		result := map[string]string{}
+		if name != "" {
+			result["name"] = name
+		}
+		if email != "" {
+			result["email"] = email
+		}
+		return result, nil
+
 	default:
 		return nil, fmt.Errorf("未知的步骤类型: %s", step.Type)
 	}
@@ -1025,6 +1063,40 @@ func (a *Agent) GetRepoPath() string {
 // GetGitWrapper 获取 Git 操作封装（供高级用户或 API 直接调用）
 func (a *Agent) GetGitWrapper() *gitwrapper.GitWrapper {
 	return a.gitWrapper
+}
+
+// IsUserConfigured 检查用户信息是否已配置（名字和邮箱都不为空）
+func (a *Agent) IsUserConfigured() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.userConfig.Name != "" && a.userConfig.Email != ""
+}
+
+// UpdateUserInfo 更新用户信息（名字和/或邮箱）
+func (a *Agent) UpdateUserInfo(name, email string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if name != "" {
+		a.userConfig.Name = name
+	}
+	if email != "" {
+		a.userConfig.Email = email
+	}
+}
+
+// ensureUserConfig 检查用户信息是否已配置，如果未配置返回错误提示
+func (a *Agent) ensureUserConfig() error {
+	if a.userConfig.Name == "" || a.userConfig.Email == "" {
+		missing := []string{}
+		if a.userConfig.Name == "" {
+			missing = append(missing, "名字")
+		}
+		if a.userConfig.Email == "" {
+			missing = append(missing, "邮箱")
+		}
+		return fmt.Errorf("请先配置您的用户信息（缺少：%s），这样团队成员才能知道是谁提交的修改。您可以说「我的名字是张三，邮箱是 zhangsan@example.com」来设置", strings.Join(missing, "和"))
+	}
+	return nil
 }
 
 // Close 关闭 Agent，释放资源

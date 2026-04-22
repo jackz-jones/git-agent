@@ -158,11 +158,8 @@ func (g *GitWrapper) SaveVersion(description string, files []string, authorName,
 	}
 
 	// 提交
-	if authorName == "" {
-		authorName = "Git Agent"
-	}
-	if authorEmail == "" {
-		authorEmail = "agent@git-agent.dev"
+	if authorName == "" || authorEmail == "" {
+		return "", fmt.Errorf("用户信息未配置，无法提交。请设置 GIT_AGENT_USER 和 GIT_AGENT_EMAIL 环境变量，或在交互中告诉我您的名字和邮箱")
 	}
 
 	hash, err := wt.Commit(description, &git.CommitOptions{
@@ -231,11 +228,8 @@ func (g *GitWrapper) Commit(message, authorName, authorEmail string) (string, er
 		return "", fmt.Errorf("获取工作区失败: %w", err)
 	}
 
-	if authorName == "" {
-		authorName = "Git Agent"
-	}
-	if authorEmail == "" {
-		authorEmail = "agent@git-agent.dev"
+	if authorName == "" || authorEmail == "" {
+		return "", fmt.Errorf("用户信息未配置，无法提交。请设置 GIT_AGENT_USER 和 GIT_AGENT_EMAIL 环境变量，或在交互中告诉我您的名字和邮箱")
 	}
 
 	hash, err := wt.Commit(message, &git.CommitOptions{

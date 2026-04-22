@@ -259,6 +259,24 @@ var AllGitAgentTools = []GitAgentTool{
 			"required": []string{"file_path", "strategy"},
 		},
 	},
+	{
+		Name:        "update_user_info",
+		Description: "设置或更新用户的姓名和邮箱，用于标识提交者身份。当用户告诉您他们的名字或邮箱时使用此工具。",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{
+					"type":        "string",
+					"description": "用户的姓名，将显示在提交记录中",
+				},
+				"email": map[string]any{
+					"type":        "string",
+					"description": "用户的邮箱地址，将显示在提交记录中",
+				},
+			},
+			"required": []string{"name", "email"},
+		},
+	},
 }
 
 // GetGitAgentTools 返回 Agent 可用的工具列表（兼容旧接口）

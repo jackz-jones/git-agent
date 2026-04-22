@@ -1051,8 +1051,8 @@ Or if you prefer to fix SSH, make sure:
 | `GIT_AGENT_BASE_URL` | LLM API URL | `https://api.openai.com/v1` | `https://api.deepseek.com/v1`, `http://localhost:11434/v1` (Ollama) |
 | `GIT_AGENT_MODEL` | LLM Model Name | `gpt-4o` | `deepseek-chat`, `qwen2.5:7b` (Ollama) |
 | `GIT_AGENT_MAX_TOKENS` | Max Tokens | `4096` | `8192` |
-| `GIT_AGENT_USER` | Username | `default_user` | `Alex` |
-| `GIT_AGENT_EMAIL` | User Email | `user@git-agent.dev` | `alex@company.com` |
+| `GIT_AGENT_USER` | Username (**required**) | — | `Alex` |
+| `GIT_AGENT_EMAIL` | User Email (**required**) | — | `alex@company.com` |
 | `GIT_HTTP_USERNAME` | HTTPS Git Username (for push auth) | None | `jackz-jones` |
 | `GIT_HTTP_PASSWORD` | HTTPS Git Password/Token (for push auth) | None | `ghp_xxxxx` |
 

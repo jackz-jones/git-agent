@@ -556,8 +556,8 @@ Build time: 2026-04-22 10:00:00
 | `GIT_AGENT_BASE_URL` | LLM API endpoint | `https://api.openai.com/v1` |
 | `GIT_AGENT_MODEL` | LLM model name | `gpt-4o` |
 | `GIT_AGENT_MAX_TOKENS` | Max token limit | `4096` |
-| `GIT_AGENT_USER` | Username | `default_user` |
-| `GIT_AGENT_EMAIL` | User email | `user@git-agent.dev` |
+| `GIT_AGENT_USER` | Username (**required**) | — |
+| `GIT_AGENT_EMAIL` | User email (**required**) | — |
 | `GIT_HTTP_USERNAME` | HTTPS Git username (for push auth) | — |
 | `GIT_HTTP_PASSWORD` | HTTPS Git password/token (for push auth) | — |
 
