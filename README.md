@@ -2,7 +2,7 @@
 
 > Empowering non-technical users to manage file versions as easily as using office software — no Git knowledge required.
 
-[中文文档](README_zh.md)
+[中文文档](README_zh.md) | [📖 Usage Guide](USAGE.md)
 
 ## Overview
 
@@ -27,28 +27,26 @@ The project supports **dual-mode operation**:
 
 ```mermaid
 graph TB
-    subgraph Interaction Layer
+    subgraph interaction[Interaction Layer]
         CLI[CLI Interface]
     end
 
-    subgraph Agent Core
+    subgraph core[Agent Core]
         AgentCore[Agent Engine<br/>Dual-Mode Dispatch]
     end
 
-    subgraph LLM Mode 🧠
-        direction TB
+    subgraph llm_mode[LLM Mode]
         LC[LangChain Go<br/>llms.Model]
         FC[Function Calling<br/>17 Git Tools]
         ReAct[ReAct Loop<br/>Reason-Act-Observe]
     end
 
-    subgraph Local Mode 📝
-        direction TB
+    subgraph local_mode[Local Mode]
         Interpreter[Intent Parser<br/>Keyword Matching]
         Planner[Execution Planner<br/>Intent → Steps]
     end
 
-    subgraph Execution Layer
+    subgraph execution[Execution Layer]
         GitWrapper[Git Operation Wrapper<br/>go-git/v5]
         ConflictDetector[Conflict Detector]
         RepoManager[Repository Manager]
@@ -141,20 +139,20 @@ The project integrates [LangChain Go v0.1.14](https://github.com/tmc/langchaingo
 
 ```mermaid
 graph TB
-    subgraph Original Implementation (Replaced)
+    subgraph old[Original Implementation - Replaced]
         OldProvider[Custom Provider Interface]
         OldMsg[Custom Message Types]
         OldTC[Custom ToolCall Types]
     end
 
-    subgraph LangChain Go Implementation
+    subgraph lc[LangChain Go Implementation]
         LCModel[llms.Model Interface<br/>openai.LLM]
         MC[llms.MessageContent<br/>System/Human/AI/Tool]
         TD[llms.Tool + FunctionDefinition<br/>Function Calling]
         TCR[llms.ToolCallResponse<br/>Tool Result Relay]
     end
 
-    subgraph Tool Adaptation Layer
+    subgraph adapt[Tool Adaptation Layer]
         GTR[GitToolRegistry<br/>Tool Registry]
         GT[GitTool<br/>tools.Tool Adapter]
         GAT[GitAgentTool<br/>Tool Definition]
@@ -193,15 +191,15 @@ The LLM mode invokes Git operations via **Function Calling**. The tool system ha
 
 ```mermaid
 graph TB
-    subgraph Tool Definition Layer
+    subgraph def[Tool Definition Layer]
         GAT[GitAgentTool<br/>Name + Description + JSON Schema]
     end
 
-    subgraph Tool Registry Layer
+    subgraph reg[Tool Registry Layer]
         GTR[GitToolRegistry<br/>Register / BuildToolDefinitions / GetTool]
     end
 
-    subgraph Tool Execution Layer
+    subgraph exec[Tool Execution Layer]
         GT[GitTool<br/>implements tools.Tool<br/>Name / Description / Call]
         EXEC[Tool Executor Closure<br/>func(ctx, params) → (string, error)]
     end
@@ -212,7 +210,7 @@ graph TB
     GTR -->|Lookup tool| GT
     GT -->|Call| EXEC
 
-    subgraph 17 Git Tools
+    subgraph tools[17 Git Tools]
         T1[save_version]
         T2[view_history]
         T3[restore_version]
