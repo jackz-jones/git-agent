@@ -881,11 +881,11 @@ In interactive mode, besides natural language operations, the following special 
 **Answer**: Tokens are the unit that LLMs use to count text — similar to "word count". Every LLM conversation consumes tokens. The usage shown in the output helps you understand the cost of each operation. For example:
 
 ```
-  Token：256 (prompt: 180, completion: 76)
+  Token 用量：256（输入: 180, 输出: 76）
 ```
 
-- `prompt`: The amount of text sent to the LLM
-- `completion`: The amount of text the LLM replied with
+- `输入 (prompt)`: The amount of text sent to the LLM
+- `输出 (completion)`: The amount of text the LLM replied with
 - Cost = Total tokens × Price per token (varies by model)
 
 ---

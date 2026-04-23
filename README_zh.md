@@ -412,7 +412,7 @@ git-agent/
 
   ✅ 已保存为新版本！
   💡 提交给团队 | 查看修改历史
-  Token: 256 (prompt: 180, completion: 76)
+Token 用量：256（输入: 180, 输出: 76）
 ```
 
 ### 场景 2：LLM 模式 - 查看修改历史
@@ -425,7 +425,7 @@ git-agent/
   | 2 | 32c99ffb | jackz | 2026-04-22 | docs: update help documentation and comments |
   | 3 | 684ac5d | jackz | 2026-04-22 | refactor: unify tool parameter passing |
 
-  Token: 312 (prompt: 220, completion: 92)
+Token 用量：312（输入: 220, 输出: 92）
 ```
 
 ### 场景 3：LLM 模式 - 查看特定提交的修改
@@ -436,7 +436,7 @@ git-agent/
   文件: agent.go | +45 -12
   文件: tools.go | +18 -3
 
-  Token: 289 (prompt: 195, completion: 94)
+Token 用量：289（输入: 195, 输出: 94）
 ```
 
 ### 场景 4：LLM 模式 - 查看状态（含同步信息）
@@ -450,7 +450,7 @@ git-agent/
 
   📡 本地领先远程 2 个提交，建议推送同步。
 
-  Token: 198 (prompt: 140, completion: 58)
+Token 用量：198（输入: 140, 输出: 58）
 ```
 
 ### 场景 5：LLM 模式 - 设置用户信息
@@ -459,7 +459,7 @@ git-agent/
 
   ✅ 用户信息已更新：小明 <xiaoming@company.com>
 
-  Token: 145 (prompt: 120, completion: 25)
+Token 用量：145（输入: 120, 输出: 25）
 ```
 
 ### 场景 6：本地模式 - 处理冲突

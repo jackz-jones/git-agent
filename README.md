@@ -412,7 +412,7 @@ All Git concepts are translated into user-friendly office language through **dat
 
   ✅ Saved as new version!
   💡 Submit to team | View change history
-  Token: 256 (prompt: 180, completion: 76)
+Token 用量：256（输入: 180, 输出: 76）
 ```
 
 ### Example 2: LLM Mode — View Change History
@@ -425,7 +425,7 @@ All Git concepts are translated into user-friendly office language through **dat
   | 2 | 32c99ffb | jackz | 2026-04-22 | docs: update help documentation and comments |
   | 3 | 684ac5d | jackz | 2026-04-22 | refactor: unify tool parameter passing |
 
-  Token: 312 (prompt: 220, completion: 92)
+Token 用量：312（输入: 220, 输出: 92）
 ```
 
 ### Example 3: LLM Mode — View Specific Commit Changes
@@ -436,7 +436,7 @@ All Git concepts are translated into user-friendly office language through **dat
   File: agent.go | +45 -12
   File: tools.go | +18 -3
 
-  Token: 289 (prompt: 195, completion: 94)
+Token 用量：289（输入: 195, 输出: 94）
 ```
 
 ### Example 4: LLM Mode — Check Status with Sync Info
@@ -450,7 +450,7 @@ All Git concepts are translated into user-friendly office language through **dat
 
   📡 Local is ahead of remote by 2 commits. Use "push" to sync.
 
-  Token: 198 (prompt: 140, completion: 58)
+Token 用量：198（输入: 140, 输出: 58）
 ```
 
 ### Example 5: LLM Mode — Set User Info
@@ -459,7 +459,7 @@ All Git concepts are translated into user-friendly office language through **dat
 
   ✅ User info updated: Alex <alex@company.com>
 
-  Token: 145 (prompt: 120, completion: 25)
+Token 用量：145（输入: 120, 输出: 25）
 ```
 
 ### Example 6: Local Mode — Handle Conflicts
