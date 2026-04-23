@@ -21,6 +21,7 @@ The project supports **dual-mode operation**:
 4. **Intelligent Conflict Handling** — Automatically detects and assists in resolving merge conflicts
 5. **Graceful Degradation** — Falls back to local mode automatically when LLM is unavailable
 6. **Smart Authentication Strategy** — New repos default to HTTPS + Token (beginner-friendly); existing repos preserve user's configured auth method; SSH auth auto-discovers `~/.ssh/config` IdentityFile
+7. **Commit Message Discipline** — All commit messages are auto-generated in English with conventional commit style (feat:/fix:/docs:/refactor:/chore:)
 
 ## Architecture
 
@@ -38,7 +39,7 @@ graph TB
 
     subgraph llm_mode[LLM Mode]
         LC[LangChain Go<br/>llms.Model]
-        FC[Function Calling<br/>17 Git Tools]
+        FC[Function Calling<br/>18 Git Tools]
         ReAct[ReAct Loop<br/>Reason-Act-Observe]
     end
 
@@ -205,13 +206,13 @@ graph TB
         EXEC["Tool Executor Closure<br/>func(ctx, params) -&gt; (string, error)"]
     end
 
-    GAT -->|17 tool definitions| GTR
+    GAT -->|18 tool definitions| GTR
     GTR -->|Register executor| EXEC
     GTR -->|Build definitions| TD["[]llms.Tool<br/>For Function Calling"]
     GTR -->|Lookup tool| GT
     GT -->|Call| EXEC
 
-    subgraph tools[17 Git Tools]
+    subgraph tools[18 Git Tools]
         T1[save_version]
         T2[view_history]
         T3[restore_version]
@@ -229,6 +230,7 @@ graph TB
         T15[pull_from_remote]
         T16[detect_conflict]
         T17[resolve_conflict]
+        T18[update_user_info]
     end
 ```
 
@@ -251,7 +253,7 @@ GitAgentTool{
         "properties": map[string]any{
             "message": map[string]any{
                 "type":        "string",
-                "description": "Version description, e.g.: Updated market analysis report",
+                "description": "Commit message in English. Summarize the main purpose of ALL file changes. Use conventional commit style, e.g.: 'feat: add Ollama LLM support', 'fix: resolve merge conflict detection'",
             },
             "files": map[string]any{
                 "type":        "string",
@@ -296,10 +298,10 @@ git-agent/
 │   ├── llm/
 │   │   ├── langchain.go             # LangChain LLM factory (openai.New adapter)
 │   │   ├── git_tools.go             # Tool registry + GitTool adapter
-│   │   ├── tools.go                 # 17 GitAgentTool definitions
+│   │   ├── tools.go                 # 18 GitAgentTool definitions
 │   │   ├── prompts.go               # System prompts (intent parsing, planning, conflict analysis)
 │   │   └── provider.go              # Compatibility layer (Usage, OpenAIConfig type definitions)
-│   ├── interpreter/interpreter.go   # Natural language intent parser (16 intents, param extraction, result translation)
+│   ├── interpreter/interpreter.go   # Natural language intent parser (18 intents, param extraction, result translation)
 │   ├── planner/planner.go           # Execution planner (intent → multi-step plan)
 │   ├── gitwrapper/gitwrapper.go     # Git operation wrapper (high-level office-friendly API)
 │   ├── conflict/conflict.go         # Conflict detection & resolution (scan, suggest, auto/manual resolve)
@@ -314,12 +316,12 @@ git-agent/
 
 | File | Lines | Responsibility |
 |------|-------|----------------|
-| `main.go` | ~318 | Interactive CLI, LLM config, environment variables, mode switching |
-| `agent/agent.go` | ~956 | Agent core: dual-mode dispatch, LangChain integration, ReAct loop, tool registry, state management |
+| `main.go` | ~362 | Interactive CLI, LLM config, environment variables, mode switching |
+| `agent/agent.go` | ~1341 | Agent core: dual-mode dispatch, LangChain integration, ReAct loop, tool registry, state management |
 | `llm/langchain.go` | ~31 | LangChain LLM factory, supports OpenAI/DeepSeek/Azure etc. |
 | `llm/git_tools.go` | ~118 | GitToolRegistry, GitTool adapter |
-| `llm/tools.go` | ~268 | 17 GitAgentTool definitions (with JSON Schema params) |
-| `llm/prompts.go` | ~147 | System prompt, intent parsing prompt, planning prompt, conflict analysis prompt |
+| `llm/tools.go` | ~302 | 18 GitAgentTool definitions (with JSON Schema params) |
+| `llm/prompts.go` | ~199 | System prompt, intent parsing prompt, planning prompt, conflict analysis prompt |
 | `llm/provider.go` | ~348 | Compatibility layer: Usage, OpenAIConfig type definitions |
 | `internal/version.go` | ~39 | Version info with ASCII art logo, ldflags-injected variables |
 
@@ -327,7 +329,7 @@ git-agent/
 
 ### Interpreter — Intent Parser (Local Mode)
 
-Parses natural language input into structured `UserIntent`, supporting **16 intents**:
+Parses natural language input into structured `UserIntent`, supporting **18 intents**:
 
 | Intent | Natural Language Example | Git Operation |
 |--------|--------------------------|---------------|
@@ -342,11 +344,13 @@ Parses natural language input into structured `UserIntent`, supporting **16 inte
 | `init_repo` | "initialize repository" | `git init` |
 | `create_branch` | "create a new branch" | `git branch` |
 | `switch_branch` | "switch to report branch" | `git checkout` |
+| `list_branches` | "list workspaces" | `git branch -a` |
 | `create_tag` | "tag this version" | `git tag` |
-| `pull_change` | "pull latest changes" | `git pull` |
+| `push` | "push to remote" | `git push` |
+| `pull` | "pull latest changes" | `git pull` |
 | `resolve_conflict` | "resolve conflict" | Manual/auto merge |
+| `update_user_info` | "my name is Alex" | Update user config |
 | `help` | "help", "what can you do" | Help documentation |
-| `unknown` | Unrecognizable input | Prompt user to retry |
 
 **Parsing Strategy**: Multi-strategy keyword matching + match score ranking, selecting the highest-confidence intent.
 
@@ -372,8 +376,11 @@ A comprehensive wrapper built on [go-git](https://github.com/go-git/go-git), pro
 | `SaveVersion()` | Save a new version | `add` + `commit` |
 | `GetHistory()` | View change history | `log` |
 | `RestoreVersion()` | Restore a previous version | `checkout` |
+| `RestoreFile()` | Restore a specific file to a previous version | `checkout` |
 | `GetDiff()` | View changes | `diff` |
+| `CommitDiff()` | View changes in a specific commit | `diff` (commit vs parent) |
 | `GetStatus()` | Check current status | `status` |
+| `GetAheadBehind()` | Check sync status with remote | `rev-list --left-right --count` |
 | `SubmitChange()` | Submit to team | `push` |
 | `PushWithAuth()` | Push with HTTPS authentication (username + token) | `push` with auth |
 | `SetRemoteURL()` | Switch remote URL (e.g., SSH → HTTPS) | `remote set-url` |
@@ -401,43 +408,69 @@ All Git concepts are translated into user-friendly office language through **dat
 
 ### Example 1: LLM Mode — Save a New Report Version
 ```
-🧠 What would you like to do? Save my changes, updated the market analysis report
+🧠 > Save my changes, updated the market analysis report
 
-✅ Saved as a new version!
-  📝 Version: abc1234
-  📝 Description: Updated the market analysis report
-  💡 You might also want to:
-     • Submit to team for review
-     • View change history
-  🔋 Token usage: 256 (prompt: 180, completion: 76)
+  ✅ Saved as new version!
+  💡 Submit to team | View change history
+  Token: 256 (prompt: 180, completion: 76)
 ```
 
-### Example 2: LLM Mode — Multi-turn Conversation
+### Example 2: LLM Mode — View Change History
 ```
-🧠 What would you like to do? What did Alice change recently?
+🧠 > View change history
 
-📜 Alice's recent changes:
-  1. [3 hours ago] Updated market data
-  2. [Yesterday] Adjusted conclusion section
-  3. [2 days ago] Added references
+  | ID | 提交 Hash | 提交人 | 时间 | 修改内容 |
+  |-----|----------|--------|------|----------|
+  | 1 | 5c1a42e1 | jackz | 2026-04-22 | feat: support viewing specific commit diff |
+  | 2 | 32c99ffb | jackz | 2026-04-22 | docs: update help documentation and comments |
+  | 3 | 684ac5d | jackz | 2026-04-22 | refactor: unify tool parameter passing |
 
-🧠 What would you like to do? Merge her changes
-
-✅ Alice's changes have been merged! All modifications applied to your working copy.
-  💡 You might also want to:
-     • View the specific changes
-     • Save the current version
+  Token: 312 (prompt: 220, completion: 92)
 ```
 
-### Example 3: Local Mode — Handle Conflicts
+### Example 3: LLM Mode — View Specific Commit Changes
 ```
-📝 What would you like to do? Pull latest changes
+🧠 > What changed in commit 5c1a42e1?
+
+  📋 Changes in commit 5c1a42e1:
+  File: agent.go | +45 -12
+  File: tools.go | +18 -3
+
+  Token: 289 (prompt: 195, completion: 94)
+```
+
+### Example 4: LLM Mode — Check Status with Sync Info
+```
+🧠 > Check status
+
+  📋 Working tree clean
+  | ID | 提交 Hash | 提交人 | 时间 | 修改内容 |
+  |-----|----------|--------|------|----------|
+  | 1 | 5c1a42e1 | jackz | 2026-04-22 | feat: support viewing specific commit diff |
+
+  📡 Local is ahead of remote by 2 commits. Use "push" to sync.
+
+  Token: 198 (prompt: 140, completion: 58)
+```
+
+### Example 5: LLM Mode — Set User Info
+```
+🧠 > My name is Alex and my email is alex@company.com
+
+  ✅ User info updated: Alex <alex@company.com>
+
+  Token: 145 (prompt: 120, completion: 25)
+```
+
+### Example 6: Local Mode — Handle Conflicts
+```
+📝 > Pull latest changes
 
 ⚠️ 1 conflict detected:
   📄 report.md: You and a colleague both modified the same section
   💡 Suggestion: The conflict area is simple, auto-merge recommended
 
-📝 What would you like to do? Resolve the conflict using merge strategy
+📝 > Resolve the conflict using merge strategy
 
 ✅ Conflict resolved!
   📝 report.md: Both sets of changes have been auto-merged
@@ -479,23 +512,13 @@ go run main.go --api-key YOUR_KEY --base-url https://YOUR.openai.azure.com/opena
 After entering interactive mode:
 
 ```
-╔══════════════════════════════════════════╗
-║     🤖 Git Agent - File Version Manager ║
-║     Making version control as easy as   ║
-║                saving a file            ║
-╚══════════════════════════════════════════╝
+Git Agent v0.1.0(abc1234)
+  🧠 LLM gpt-4o @ api.openai.com
 
-🧠 LLM Mode enabled (gpt-4o @ api.openai.com)
-   Just talk naturally — the Agent understands your needs.
+  输入「帮助」查看所有操作  输入「退出」结束会话
 
-💡 Tell me what you'd like to do, for example:
-   • Save my current changes
-   • View change history
-   • What did Alice change?
-   • Restore yesterday's version
-   • Type "help" for more options
 
-🧠 What would you like to do? _
+🧠 > _
 ```
 
 ### Build from Source
@@ -591,10 +614,12 @@ make test
 ### Phase 2 — LLM Enhancement ✅
 - [x] LangChain Go integration (v0.1.14)
 - [x] Function Calling + ReAct loop
-- [x] 17 Git tool definitions & registry
+- [x] 18 Git tool definitions & registry
 - [x] OpenAI / DeepSeek / Azure multi-model support
 - [x] Automatic fallback to local mode on LLM failure
 - [x] Conversation context management
+- [x] Commit messages in English with conventional commit style
+- [x] HTTPS authentication support for push operations
 
 ### Phase 3 — Team Collaboration 🚧
 - [ ] Multi-user submission & review

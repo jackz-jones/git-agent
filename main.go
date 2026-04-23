@@ -15,9 +15,9 @@ import (
 
 // ANSI 颜色常量
 const (
-	colorReset  = "\033[0m"
-	colorGray   = "\033[90m"
-	colorCyan   = "\033[36m"
+	colorReset = "\033[0m"
+	colorGray  = "\033[90m"
+	colorCyan  = "\033[36m"
 
 	// 组合样式
 	styleSuccess = "\033[1;32m" // 加粗绿色
@@ -327,6 +327,8 @@ func printHelp() {
 	fmt.Printf("  GIT_AGENT_MAX_TOKENS    最大 token 数（默认 4096）\n")
 	fmt.Printf("  %sGIT_AGENT_USER         用户名（必填）%s\n", styleWarn, colorReset)
 	fmt.Printf("  %sGIT_AGENT_EMAIL        用户邮箱（必填）%s\n", styleWarn, colorReset)
+	fmt.Printf("  GIT_HTTP_USERNAME      HTTPS 认证用户名（推送时使用）\n")
+	fmt.Printf("  GIT_HTTP_PASSWORD      HTTPS 认证密码/令牌（推送时使用）\n")
 
 	fmt.Printf("\n%s交互命令%s\n", styleBold, colorReset)
 	fmt.Println("  /mode local   切换到本地模式")

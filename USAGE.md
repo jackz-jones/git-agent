@@ -155,25 +155,16 @@ go run main.go
 After starting, you'll see the welcome screen:
 
 ```
-╔══════════════════════════════════════════╗
-║     🤖 Git Agent - Version Control      ║
-║         Making version control simple    ║
-╚══════════════════════════════════════════╝
+Git Agent v0.1.0(abc1234)
+  🧠 LLM deepseek-chat @ api.deepseek.com
 
-🧠 LLM Mode enabled (deepseek-chat @ api.deepseek.com)
-   You can use natural language directly — the Agent will intelligently understand your needs.
+  输入「帮助」查看所有操作  输入「退出」结束会话
 
-💡 Tell me what you'd like to do in natural language, for example:
-   • Save current changes
-   • View change history
-   • See what Alex changed
-   • Restore yesterday's version
-   • Type "help" for more operations
 
-🧠 What would you like to do? _
+🧠 > _
 ```
 
-> 📝 In local mode, the header will show `📝 Local Mode (keyword matching)`. Usage is exactly the same, but comprehension is more limited.
+> 📝 In local mode, the header will show `📝 Local Mode (configure LLM for smarter experience: git-agent --help)`. Usage is exactly the same, but comprehension is more limited.
 
 ---
 
@@ -209,7 +200,7 @@ go run main.go
 When using Git Agent in a new folder for the first time, you need to initialize:
 
 ```
-🧠 What would you like to do? Initialize repository
+🧠 > Initialize repository
 
 ✅ Repository created. You can now start adding files.
 ```
@@ -226,7 +217,7 @@ While Git Agent is running, create or edit files in the directory using your fav
 ### Step 4: Save Your First Version
 
 ```
-🧠 What would you like to do? Save changes, this is the first draft
+🧠 > Save changes, this is the first draft
 
 ✅ Saved as new version #a1b2c3d4
   💡 You might also want to:
@@ -243,7 +234,7 @@ Edit `market-report.md` with your editor, for example adding a paragraph of anal
 ### Step 6: See What Changed
 
 ```
-🧠 What would you like to do? See what changed
+🧠 > See what changed
 
 📋 Change details:
 File: market-report.md | Status: Modified (unstaged)
@@ -252,7 +243,7 @@ File: market-report.md | Status: Modified (unstaged)
 ### Step 7: Save the New Version
 
 ```
-🧠 What would you like to do? Save changes, added competitive analysis section
+🧠 > Save changes, added competitive analysis section
 
 ✅ Saved as new version #e5f6a7b8
 ```
@@ -260,7 +251,7 @@ File: market-report.md | Status: Modified (unstaged)
 ### Step 8: View Change History
 
 ```
-🧠 What would you like to do? View history
+🧠 > View history
 
 📋 Found 2 history records:
   1. Version #e5f6a7b8
@@ -290,7 +281,7 @@ This is the most common operation. After editing files, just tell the Agent to s
 **Full Example:**
 
 ```
-🧠 What would you like to do? Save changes, completed first draft of market analysis
+🧠 > Save changes, completed first draft of market analysis
 
 ✅ Saved as new version #c3d4e5f6
   💡 You might also want to:
@@ -301,7 +292,7 @@ This is the most common operation. After editing files, just tell the Agent to s
 **Save Only Specific Files:**
 
 ```
-🧠 What would you like to do? Save changes to market-report.md, adjusted data section
+🧠 > Save changes to market-report.md, adjusted data section
 
 ✅ Saved as new version #d4e5f6a7
 ```
@@ -326,7 +317,7 @@ View all previously saved version records.
 **Full Example:**
 
 ```
-🧠 What would you like to do? View history
+🧠 > View history
 
 📋 Found 5 history records:
   1. Version #f7a8b9c0
@@ -358,20 +349,24 @@ See which files have been modified, which are new, and which have already been s
 **Full Example (with changes):**
 
 ```
-🧠 What would you like to do? Check status
+🧠 > Check status
 
 📋 Current status:
   Staged changes: 2 files
   Unstaged changes: 1 file
   New files: 1
+
+📡 Local is ahead of remote by 2 commits. Use "push" to sync.
 ```
 
 **Full Example (no changes):**
 
 ```
-🧠 What would you like to do? Check status
+🧠 > Check status
 
 ✅ No unsaved changes
+
+📡 Local and remote are in sync.
 ```
 
 ---
@@ -389,15 +384,26 @@ View the specific content of your changes, compared to the last saved version.
 | `Compare differences` | Same as above |
 | `What are the changes` | Same as above |
 | `What changed in market-report.md` | Show changes for a specific file only |
+| `What changed in commit 5c1a42e1` | Show changes in a specific commit |
 
 **Full Example:**
 
 ```
-🧠 What would you like to do? See what changed
+🧠 > See what changed
 
 📋 Change details:
 File: market-report.md | Status: Modified (unstaged)
 File: data.xlsx | Status: Modified (unstaged)
+```
+
+**View changes in a specific commit:**
+
+```
+🧠 > What changed in commit 5c1a42e1?
+
+📋 Changes in commit 5c1a42e1:
+File: agent.go | +45 -12
+File: tools.go | +18 -3
 ```
 
 ---
@@ -421,7 +427,7 @@ If you've broken a file or want to go back to a previous version, use the restor
 **Full Example:**
 
 ```
-🧠 What would you like to do? Restore version e5f6a7b8
+🧠 > Restore version e5f6a7b8
 
 ✅ Restored to specified version
 ```
@@ -429,7 +435,7 @@ If you've broken a file or want to go back to a previous version, use the restor
 **Restore Only a Specific File:**
 
 ```
-🧠 What would you like to do? Restore market-report.md to version e5f6a7b8
+🧠 > Restore market-report.md to version e5f6a7b8
 
 ✅ Restored to specified version
 ```
@@ -453,7 +459,7 @@ Give an important version a memorable name like "final" or "v1.0" for easy looku
 **Full Example:**
 
 ```
-🧠 What would you like to do? Tag v1.0
+🧠 > Tag v1.0
 
 ✅ Version tagged as "v1.0"
 ```
@@ -479,7 +485,7 @@ Push your changes to the remote repository so team members can see them.
 **Full Example:**
 
 ```
-🧠 What would you like to do? Submit to team, completed competitive analysis
+🧠 > Submit to team, completed competitive analysis
 
 ✅ Synced to remote repository
 ```
@@ -515,7 +521,7 @@ If push fails with an authentication error, Git Agent will guide you through get
 Then tell Git Agent:
 
 ```
-🧠 What would you like to do? My username is jackz-jones and my token is ghp_xxxxx
+🧠 > My username is jackz-jones and my token is ghp_xxxxx
 
 ✅ Pushed successfully with your credentials!
 ```
@@ -525,7 +531,7 @@ Then tell Git Agent:
 If your repository was cloned with SSH and you're having trouble with SSH keys, you can switch to HTTPS:
 
 ```
-🧠 What would you like to do? Push to remote, use HTTPS address https://github.com/jackz-jones/my-project.git, username jackz-jones, token ghp_xxxxx
+🧠 > Push to remote, use HTTPS address https://github.com/jackz-jones/my-project.git, username jackz-jones, token ghp_xxxxx
 
 ✅ Remote URL switched to HTTPS and pushed successfully!
 ```
@@ -570,7 +576,7 @@ See what changes team members have made recently.
 **Full Example:**
 
 ```
-🧠 What would you like to do? See what Alex changed
+🧠 > See what Alex changed
 
 📋 Alex's recent changes:
   1. [3 hours ago] Updated market data
@@ -597,7 +603,7 @@ Merge a colleague's workspace into your current work.
 **Full Example:**
 
 ```
-🧠 What would you like to do? Merge changes from alex-market-analysis
+🧠 > Merge changes from alex-market-analysis
 
 ✅ Merged alex-market-analysis changes into current workspace
 ```
@@ -623,7 +629,7 @@ Pull the latest changes from the remote repository made by other team members.
 **Full Example:**
 
 ```
-🧠 What would you like to do? Get latest
+🧠 > Get latest
 
 ✅ Latest content retrieved
 ```
@@ -658,7 +664,7 @@ Pull the latest changes from the remote repository made by other team members.
 **Full Example:**
 
 ```
-🧠 What would you like to do? Create workspace new-proposal
+🧠 > Create workspace new-proposal
 
 ✅ Workspace "new-proposal" created
 ```
@@ -680,7 +686,7 @@ Switch between different workspaces.
 **Full Example:**
 
 ```
-🧠 What would you like to do? Switch to new-proposal
+🧠 > Switch to new-proposal
 
 ✅ Switched to workspace "new-proposal"
 ```
@@ -702,7 +708,7 @@ Switch between different workspaces.
 **Full Example:**
 
 ```
-🧠 What would you like to do? List workspaces
+🧠 > List workspaces
 
 📋 Branches: [main new-proposal feature-market]
 ```
@@ -739,7 +745,7 @@ Proactively check for conflicts.
 **Full Example (no conflicts):**
 
 ```
-🧠 What would you like to do? Any conflicts
+🧠 > Any conflicts
 
 📋 Conflict check result: [] No conflicts found
 ```
@@ -747,7 +753,7 @@ Proactively check for conflicts.
 **Full Example (with conflicts):**
 
 ```
-🧠 What would you like to do? Any conflicts
+🧠 > Any conflicts
 
 📋 Conflict check result:
   📄 report.md: You and a colleague both modified the same position
@@ -776,13 +782,13 @@ There are three conflict resolution strategies:
 **Full Example (LLM Mode):**
 
 ```
-🧠 What would you like to do? Pull latest changes
+🧠 > Pull latest changes
 
 ⚠️ Found 1 conflict to resolve:
   📄 report.md: You and a colleague both modified the same position
   💡 Suggestion: The conflict area is simple, auto-merge is recommended
 
-🧠 What would you like to do? Resolve conflict using merge strategy
+🧠 > Resolve conflict using merge strategy
 
 ✅ Conflict resolved!
   📝 report.md: Both changes have been auto-merged
@@ -794,7 +800,7 @@ There are three conflict resolution strategies:
 **Full Example (Local Mode):**
 
 ```
-📝 What would you like to do? Resolve conflict report.md using merge
+📝 > Resolve conflict report.md using merge
 
 ✅ Both changes have been auto-merged
 ```
@@ -820,7 +826,7 @@ In interactive mode, besides natural language operations, the following special 
 **Clear Conversation History Example:**
 
 ```
-🧠 What would you like to do? /clear
+🧠 > /clear
 
 🧹 Conversation history cleared
 ```
@@ -836,7 +842,7 @@ In interactive mode, besides natural language operations, the following special 
 **Answer**: Type `Initialize repository` in Git Agent. This will create a document repository in the current directory.
 
 ```
-🧠 What would you like to do? Initialize repository
+🧠 > Initialize repository
 
 ✅ Repository created. You can now start adding files.
 ```
@@ -875,7 +881,7 @@ In interactive mode, besides natural language operations, the following special 
 **Answer**: Tokens are the unit that LLMs use to count text — similar to "word count". Every LLM conversation consumes tokens. The usage shown in the output helps you understand the cost of each operation. For example:
 
 ```
-  🔋 Token usage: 256 (prompt: 180, completion: 76)
+  Token：256 (prompt: 180, completion: 76)
 ```
 
 - `prompt`: The amount of text sent to the LLM
@@ -886,12 +892,20 @@ In interactive mode, besides natural language operations, the following special 
 
 ### Q6: How do I set my name and email?
 
-**Answer**: Set them via environment variables before starting Git Agent:
+**Answer**: You can set them via environment variables before starting Git Agent:
 
 ```bash
 export GIT_AGENT_USER=Alex
 export GIT_AGENT_EMAIL=alex@company.com
 go run main.go
+```
+
+Or you can tell Git Agent directly in conversation:
+
+```
+🧠 > My name is Alex and my email is alex@company.com
+
+✅ User info updated: Alex <alex@company.com>
 ```
 
 This way, when you save a version, the author will show as "Alex".
@@ -934,29 +948,14 @@ If Function Calling still fails, you can fall back to local mode by removing the
 Type `help` in interactive mode:
 
 ```
-🧠 What would you like to do? help
+🧠 > help
 
-🤖 Git Agent - Your Version Control Assistant
+📂 Version Control: Save changes | View history | Restore version | View diff
+👥 Team Collaboration: Submit to team | See what XX changed | Merge XX's proposal
+🔧 Repository Management: Initialize repo | Check status | Push | Pull
+👤 User Settings: My name is XX | My email is XX
 
-I can help you with the following operations:
-
-📂 Version Management:
-  • "Save changes" - Save current files as a new version
-  • "View history" - View change records
-  • "Restore version" - Go back to a previous version
-  • "View diff" - Compare change content
-
-👥 Team Collaboration:
-  • "Submit to team" - Submit changes for team review
-  • "See what Alex changed" - View others' changes
-  • "Merge Bob's proposal" - Merge others' changes
-
-🔧 Repository Management:
-  • "Initialize repository" - Create a new document repository
-  • "Check status" - View current change status
-  • "Push" / "Pull" - Sync with remote repository
-
-Just tell me what you'd like to do in natural language!
+Just type in natural language!
 ```
 
 ---
@@ -970,7 +969,7 @@ Just tell me what you'd like to do in natural language!
 Git Agent will prompt you to provide a username and access token. Just tell it in natural language:
 
 ```
-🧠 What would you like to do? Push with username jackz-jones and token ghp_xxxxx
+🧠 > Push with username jackz-jones and token ghp_xxxxx
 ```
 
 To get a GitHub Personal Access Token: Login → Avatar → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token → Check "repo" scope → Generate → Copy token.
@@ -980,7 +979,7 @@ To get a GitHub Personal Access Token: Login → Avatar → Settings → Develop
 If SSH authentication fails, Git Agent will suggest switching to HTTPS, which is easier:
 
 ```
-🧠 What would you like to do? Push using HTTPS address https://github.com/user/repo.git, username jackz-jones, token ghp_xxxxx
+🧠 > Push using HTTPS address https://github.com/user/repo.git, username jackz-jones, token ghp_xxxxx
 ```
 
 Or if you prefer to fix SSH, make sure:

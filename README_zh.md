@@ -21,6 +21,7 @@ Git Agent 是一个用 Go 语言实现的 **自然语言驱动的文件版本管
 4. **智能冲突处理** — 自动检测并协助解决多人编辑冲突
 5. **优雅降级** — LLM 不可用时自动回退到本地模式
 6. **智能认证策略** — 新仓库默认 HTTPS + 令牌（对新手友好）；已有仓库保持用户已配置的认证方式；SSH 认证自动读取 `~/.ssh/config` 中的 IdentityFile
+7. **提交信息规范** — 自动生成英文 conventional commit 风格的提交信息（feat:/fix:/docs:/refactor:/chore:）
 
 ## 架构设计
 
@@ -38,7 +39,7 @@ graph TB
 
     subgraph llm_mode[LLM 模式]
         LC[LangChain Go<br/>llms.Model]
-        FC[Function Calling<br/>17 Git 工具]
+        FC[Function Calling<br/>18 Git 工具]
         ReAct[ReAct 循环<br/>推理-行动-观察]
     end
 
@@ -205,13 +206,13 @@ graph TB
         EXEC["工具执行器闭包<br/>func(ctx, params) -&gt; (string, error)"]
     end
 
-    GAT -->|17 个工具定义| GTR
+    GAT -->|18 个工具定义| GTR
     GTR -->|注册执行器| EXEC
     GTR -->|构建定义| TD["[]llms.Tool<br/>用于 Function Calling"]
     GTR -->|查找工具| GT
     GT -->|Call| EXEC
 
-    subgraph tools[17 个 Git 工具]
+    subgraph tools[18 个 Git 工具]
         T1[save_version]
         T2[view_history]
         T3[restore_version]
@@ -229,6 +230,7 @@ graph TB
         T15[pull_from_remote]
         T16[detect_conflict]
         T17[resolve_conflict]
+        T18[update_user_info]
     end
 ```
 
@@ -251,7 +253,7 @@ GitAgentTool{
         "properties": map[string]any{
             "message": map[string]any{
                 "type":        "string",
-                "description": "版本描述，例如：更新了市场分析报告",
+                "description": "Commit message in English. Summarize the main purpose of ALL file changes. Use conventional commit style, e.g.: 'feat: add Ollama LLM support', 'fix: resolve merge conflict detection'",
             },
             "files": map[string]any{
                 "type":        "string",
@@ -296,10 +298,10 @@ git-agent/
 │   ├── llm/
 │   │   ├── langchain.go             # LangChain LLM 工厂（openai.New 适配）
 │   │   ├── git_tools.go             # 工具注册中心 + GitTool 适配器
-│   │   ├── tools.go                 # 17 个 GitAgentTool 定义
+│   │   ├── tools.go                 # 18 个 GitAgentTool 定义
 │   │   ├── prompts.go               # 系统提示词（SystemPrompt、意图解析、规划、冲突分析）
 │   │   └── provider.go              # 兼容保留（Usage、OpenAIConfig 等类型定义）
-│   ├── interpreter/interpreter.go   # 自然语言意图解析（16种意图、参数提取、结果翻译）
+│   ├── interpreter/interpreter.go   # 自然语言意图解析（18种意图、参数提取、结果翻译）
 │   ├── planner/planner.go           # 执行规划器（意图 → 多步骤计划）
 │   ├── gitwrapper/gitwrapper.go     # Git 操作封装（面向办公场景的高层接口）
 │   ├── conflict/conflict.go         # 冲突检测与解决（扫描、建议、自动/手动解决）
@@ -314,12 +316,12 @@ git-agent/
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `main.go` | ~318 | 交互式 CLI、LLM 配置、环境变量、模式切换 |
-| `agent/agent.go` | ~956 | Agent 核心：双模式调度、LangChain 集成、ReAct 循环、工具注册、状态管理 |
+| `main.go` | ~362 | 交互式 CLI、LLM 配置、环境变量、模式切换 |
+| `agent/agent.go` | ~1341 | Agent 核心：双模式调度、LangChain 集成、ReAct 循环、工具注册、状态管理 |
 | `llm/langchain.go` | ~31 | LangChain LLM 工厂，支持 OpenAI/DeepSeek/Azure 等 |
 | `llm/git_tools.go` | ~118 | GitToolRegistry 工具注册中心、GitTool 适配器 |
-| `llm/tools.go` | ~268 | 17 个 GitAgentTool 定义（含 JSON Schema 参数） |
-| `llm/prompts.go` | ~147 | 系统提示词、意图解析提示词、规划提示词、冲突分析提示词 |
+| `llm/tools.go` | ~302 | 18 个 GitAgentTool 定义（含 JSON Schema 参数） |
+| `llm/prompts.go` | ~199 | 系统提示词、意图解析提示词、规划提示词、冲突分析提示词 |
 | `llm/provider.go` | ~348 | 兼容保留：Usage、OpenAIConfig 等类型定义 |
 | `internal/version.go` | ~39 | 版本信息与 ASCII Art Logo，通过 ldflags 注入变量 |
 
@@ -327,7 +329,7 @@ git-agent/
 
 ### Interpreter — 意图解析引擎（本地模式）
 
-将用户的自然语言输入解析为结构化的 `UserIntent`，支持 **16 种意图**：
+将用户的自然语言输入解析为结构化的 `UserIntent`，支持 **18 种意图**：
 
 | 意图 | 自然语言示例 | 对应 git 操作 |
 |------|-------------|--------------|
@@ -342,11 +344,13 @@ git-agent/
 | `init_repo` | "初始化仓库" | `git init` |
 | `create_branch` | "新建工作分支" | `git branch` |
 | `switch_branch` | "切换到报告分支" | `git checkout` |
+| `list_branches` | "列出工作副本" | `git branch -a` |
 | `create_tag` | "标记这个版本" | `git tag` |
-| `pull_change` | "拉取最新修改" | `git pull` |
-| `resolve_conflict` | "解决冲突" | 手动/自动合并 |
+| `push` | "推送到远程" | `git push` |
+| `pull` | "拉取最新修改" | `git pull` |
+| `detect_conflict` | "检测冲突" | 扫描冲突标记 |
+| `update_user_info` | "我的名字是小明" | 更新用户配置 |
 | `help` | "帮助"、"你能做什么" | 帮助文档 |
-| `unknown` | 无法识别的输入 | 提示用户重新输入 |
 
 **解析策略**：多策略关键词匹配 + 匹配分数排序，选出最高置信度的意图。
 
@@ -372,8 +376,11 @@ git-agent/
 | `SaveVersion()` | 保存新版本 | `add` + `commit` |
 | `GetHistory()` | 查看修改历史 | `log` |
 | `RestoreVersion()` | 恢复旧版本 | `checkout` |
+| `RestoreFile()` | 恢复指定文件到旧版本 | `checkout` |
 | `GetDiff()` | 查看改动内容 | `diff` |
+| `CommitDiff()` | 查看某次提交的修改内容 | `diff`（提交 vs 父提交） |
 | `GetStatus()` | 查看当前状态 | `status` |
+| `GetAheadBehind()` | 查看与远程的同步状态 | `rev-list --left-right --count` |
 | `SubmitChange()` | 提交给团队 | `push` |
 | `PushWithAuth()` | 使用 HTTPS 认证推送（用户名+令牌） | `push` with auth |
 | `SetRemoteURL()` | 切换远程仓库地址（如 SSH → HTTPS） | `remote set-url` |
@@ -401,43 +408,69 @@ git-agent/
 
 ### 场景 1：LLM 模式 - 保存报告新版本
 ```
-🧠 您想做什么？ 帮我保存一下修改，更新了市场分析报告
+🧠 > 帮我保存一下修改，更新了市场分析报告
 
-✅ 已保存为新版本！
-  📝 版本号：abc1234
-  📝 描述：更新了市场分析报告
-  💡 您可能还想：
-     • 提交给团队审核
-     • 查看修改历史
-  🔋 Token 用量：256 (prompt: 180, completion: 76)
+  ✅ 已保存为新版本！
+  💡 提交给团队 | 查看修改历史
+  Token: 256 (prompt: 180, completion: 76)
 ```
 
-### 场景 2：LLM 模式 - 多轮对话
+### 场景 2：LLM 模式 - 查看修改历史
 ```
-🧠 您想做什么？ 看看小李最近改了哪些地方
+🧠 > 查看历史
 
-📜 小李最近的修改记录：
-  1. [3小时前] 更新市场数据
-  2. [昨天] 调整结论部分
-  3. [2天前] 添加参考文献
+  | ID | 提交 Hash | 提交人 | 时间 | 修改内容 |
+  |-----|----------|--------|------|----------|
+  | 1 | 5c1a42e1 | jackz | 2026-04-22 | feat: support viewing specific commit diff |
+  | 2 | 32c99ffb | jackz | 2026-04-22 | docs: update help documentation and comments |
+  | 3 | 684ac5d | jackz | 2026-04-22 | refactor: unify tool parameter passing |
 
-🧠 您想做什么？ 把他的修改合并过来
-
-✅ 已合并小李的修改！所有改动已应用到您的工作副本中。
-  💡 您可能还想：
-     • 查看具体修改内容
-     • 保存当前版本
+  Token: 312 (prompt: 220, completion: 92)
 ```
 
-### 场景 3：本地模式 - 处理冲突
+### 场景 3：LLM 模式 - 查看特定提交的修改
 ```
-📝 您想做什么？ 拉取最新修改
+🧠 > 提交 5c1a42e1 改了什么？
+
+  📋 提交 5c1a42e1 的修改内容：
+  文件: agent.go | +45 -12
+  文件: tools.go | +18 -3
+
+  Token: 289 (prompt: 195, completion: 94)
+```
+
+### 场景 4：LLM 模式 - 查看状态（含同步信息）
+```
+🧠 > 查看状态
+
+  📋 工作区无修改
+  | ID | 提交 Hash | 提交人 | 时间 | 修改内容 |
+  |-----|----------|--------|------|----------|
+  | 1 | 5c1a42e1 | jackz | 2026-04-22 | feat: support viewing specific commit diff |
+
+  📡 本地领先远程 2 个提交，建议推送同步。
+
+  Token: 198 (prompt: 140, completion: 58)
+```
+
+### 场景 5：LLM 模式 - 设置用户信息
+```
+🧠 > 我的名字是小明，邮箱是 xiaoming@company.com
+
+  ✅ 用户信息已更新：小明 <xiaoming@company.com>
+
+  Token: 145 (prompt: 120, completion: 25)
+```
+
+### 场景 6：本地模式 - 处理冲突
+```
+📝 > 拉取最新修改
 
 ⚠️ 发现 1 处冲突需要处理：
   📄 report.md：您和同事都修改了同一位置
   💡 建议：冲突区域简单，建议自动合并
 
-📝 您想做什么？ 解决冲突，用 merge 策略
+📝 > 解决冲突，用 merge 策略
 
 ✅ 冲突已解决！
   📝 report.md：已自动合并双方修改
@@ -478,22 +511,13 @@ go run main.go --api-key YOUR_KEY --base-url https://YOUR.openai.azure.com/opena
 进入交互模式后：
 
 ```
-╔══════════════════════════════════════════╗
-║     🤖 Git Agent - 文件版本管理助手      ║
-║         让版本控制像保存一样简单          ║
-╚══════════════════════════════════════════╝
+Git Agent v0.1.0(abc1234)
+  🧠 LLM gpt-4o @ api.openai.com
 
-🧠 LLM 模式已启用（gpt-4o @ api.openai.com）
-   您可以直接用自然语言对话，Agent 会智能理解您的需求。
+  输入「帮助」查看所有操作  输入「退出」结束会话
 
-💡 用自然语言告诉我你想做什么，例如：
-   • 保存当前修改
-   • 查看修改历史
-   • 看看小李改了什么
-   • 恢复昨天的版本
-   • 输入「帮助」查看更多操作
 
-🧠 您想做什么？ _
+🧠 > _
 ```
 
 ### 从源码构建
@@ -589,10 +613,12 @@ make test
 ### Phase 2 — LLM 智能增强 ✅
 - [x] 集成 LangChain Go 框架（v0.1.14）
 - [x] Function Calling + ReAct 循环
-- [x] 17 个 Git 工具定义与注册中心
+- [x] 18 个 Git 工具定义与注册中心
 - [x] OpenAI / DeepSeek / Azure 等多模型支持
 - [x] LLM 失败自动回退本地模式
 - [x] 对话上下文管理
+- [x] 提交信息使用英文 conventional commit 风格
+- [x] HTTPS 认证支持推送操作
 
 ### Phase 3 — 团队协作 🚧
 - [ ] 多用户提交与查看
