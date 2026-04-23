@@ -12,13 +12,13 @@ type GitAgentTool struct {
 var AllGitAgentTools = []GitAgentTool{
 	{
 		Name:        "save_version",
-		Description: "保存当前文件修改为新版本。用户完成编辑后使用此功能保存。",
+		Description: "保存当前文件修改为新版本。用户完成编辑后使用此功能保存。**重要：调用此工具前，必须先调用 view_diff 查看实际修改内容，基于 diff 结果撰写具体的 commit message，不可凭空猜测。**",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"message": map[string]any{
 					"type":        "string",
-					"description": "Commit message in English. Summarize the main purpose of ALL file changes, with brief details. Use conventional commit style, e.g.: 'feat: add Ollama LLM support and update docs', 'fix: resolve merge conflict detection in Diff method'",
+					"description": "Commit message in English. MUST be based on the actual diff content you just viewed — summarize the specific changes you saw, not vague descriptions. Use conventional commit style, e.g.: 'feat: add commit_hash param to view_diff and update status display' (NOT just 'docs: update files')",
 				},
 				"files": map[string]any{
 					"type":        "string",
@@ -93,13 +93,13 @@ var AllGitAgentTools = []GitAgentTool{
 	},
 	{
 		Name:        "submit_change",
-		Description: "将修改提交给团队审核。会先保存版本，再推送到远程仓库。",
+		Description: "将修改提交给团队审核。会先保存版本，再推送到远程仓库。**重要：调用此工具前，必须先调用 view_diff 查看实际修改内容，基于 diff 结果撰写具体的 commit message，不可凭空猜测。**",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"message": map[string]any{
 					"type":        "string",
-					"description": "Commit message in English. Summarize the main purpose of ALL file changes, with brief details. Use conventional commit style, e.g.: 'feat: add team collaboration workflow', 'fix: resolve push timeout issue'",
+					"description": "Commit message in English. MUST be based on the actual diff content you just viewed — summarize the specific changes you saw, not vague descriptions. Use conventional commit style, e.g.: 'feat: add HTTPS auth support for push operations' (NOT just 'chore: submit changes')",
 				},
 			},
 			"required": []string{"message"},
