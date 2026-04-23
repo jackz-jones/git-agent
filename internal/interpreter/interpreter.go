@@ -838,10 +838,10 @@ func buildVersionTable(versions []map[string]interface{}) string {
 		date := toStrFromMap(v, "date")
 		message := toStrFromMap(v, "message")
 
-		// 格式化时间（只保留日期部分）
+		// 格式化时间（保留到秒：YYYY-MM-DD HH:MM:SS）
 		dateStr := date
-		if len(dateStr) > 10 {
-			dateStr = dateStr[:10]
+		if len(dateStr) > 19 {
+			dateStr = dateStr[:19]
 		}
 		// 清理 message 中的换行
 		message = strings.TrimSpace(strings.ReplaceAll(message, "\n", " "))
@@ -897,10 +897,10 @@ func formatVersionTable(result interface{}) string {
 		date := toStrFromMap(v, "date")
 		message := toStrFromMap(v, "message")
 
-		// 格式化时间（只保留日期部分）
+		// 格式化时间（保留到秒：YYYY-MM-DD HH:MM:SS）
 		dateStr := date
-		if len(dateStr) > 10 {
-			dateStr = dateStr[:10]
+		if len(dateStr) > 19 {
+			dateStr = dateStr[:19]
 		}
 		// 清理 message 中的换行
 		message = strings.TrimSpace(strings.ReplaceAll(message, "\n", " "))
