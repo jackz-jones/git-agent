@@ -18,7 +18,7 @@ var AllGitAgentTools = []GitAgentTool{
 			"properties": map[string]any{
 				"message": map[string]any{
 					"type":        "string",
-					"description": "Commit message in English. MUST be based on the actual diff content you just viewed. Use conventional commit style: `type: summary`. Type rules: fix(bug修复) > feat(源码变更,*.go/*.py/*.ts/*.cpp等) > refactor(重构) > perf(性能优化) > docs(文档,README/USAGE/*.md等) > style(格式) > test(测试) > chore(构建/辅助). E.g. 'feat: add commit_hash param to view_diff' (NOT just 'docs: update files')",
+					"description": "Commit message in English. MUST be based on the actual diff content you just viewed. Use conventional commit style: 'type: summary'. IMPORTANT: Determine type by the FILE EXTENSION being modified, not by the purpose. If ANY .go/.py/.ts/.cpp/.java/.rs etc. source code file is modified, use 'feat' (even if the change is documentation-related). Only use 'docs' when ONLY .md/.txt/.rst etc. doc files are changed. Type priority: fix>feat>refactor>perf>docs>style>test>chore. E.g. 'feat: add commit_hash param to view_diff' (NOT just 'docs: update files')",
 				},
 				"files": map[string]any{
 					"type":        "string",
@@ -99,7 +99,7 @@ var AllGitAgentTools = []GitAgentTool{
 			"properties": map[string]any{
 				"message": map[string]any{
 					"type":        "string",
-					"description": "Commit message in English. MUST be based on the actual diff content you just viewed. Use conventional commit style: `type: summary`. Type rules: fix(bug修复) > feat(源码变更,*.go/*.py/*.ts/*.cpp等) > refactor(重构) > perf(性能优化) > docs(文档,README/USAGE/*.md等) > style(格式) > test(测试) > chore(构建/辅助). E.g. 'feat: add HTTPS auth support for push' (NOT just 'chore: submit changes')",
+					"description": "Commit message in English. MUST be based on the actual diff content you just viewed. Use conventional commit style: 'type: summary'. IMPORTANT: Determine type by the FILE EXTENSION being modified, not by the purpose. If ANY .go/.py/.ts/.cpp/.java/.rs etc. source code file is modified, use 'feat' (even if the change is documentation-related). Only use 'docs' when ONLY .md/.txt/.rst etc. doc files are changed. Type priority: fix>feat>refactor>perf>docs>style>test>chore. E.g. 'feat: add HTTPS auth support for push' (NOT just 'chore: submit changes')",
 				},
 			},
 			"required": []string{"message"},
