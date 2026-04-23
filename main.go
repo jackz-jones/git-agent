@@ -214,7 +214,7 @@ func printResponse(resp *agent.AgentResponse) {
 	}
 
 	if resp.UsedLLM && resp.TokenUsage != nil {
-		fmt.Printf("  %sToken：%d (prompt: %d, completion: %d)%s\n",
+		fmt.Printf("  %sToken 用量：%d（输入: %d, 输出: %d）%s\n",
 			colorGray,
 			resp.TokenUsage.TotalTokens,
 			resp.TokenUsage.PromptTokens,

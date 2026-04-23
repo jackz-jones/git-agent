@@ -536,6 +536,11 @@ func (a *Agent) processWithLLM(ctx context.Context, input string) *AgentResponse
 // 支持 ReAct 多轮：LLM 可能返回工具调用 → 执行工具 → 结果回传 → LLM 继续推理
 // iteration: 当前迭代次数，用于防止无限循环
 func (a *Agent) handleLLMResponse(ctx context.Context, resp *llms.ContentResponse, iteration int) *AgentResponse {
+	return a.handleLLMResponseWithUsage(ctx, resp, iteration, nil)
+}
+
+// handleLLMResponseWithUsage 处理 LLM 响应，支持跨多轮 ReAct 累加 token 用量
+func (a *Agent) handleLLMResponseWithUsage(ctx context.Context, resp *llms.ContentResponse, iteration int, accumUsage *llm.Usage, callHistory ...map[string]int) *AgentResponse {
 	if len(resp.Choices) == 0 {
 		a.setState(StateIdle)
 		return &AgentResponse{
@@ -550,28 +555,33 @@ func (a *Agent) handleLLMResponse(ctx context.Context, resp *llms.ContentRespons
 	choice := resp.Choices[0]
 	var totalUsage llm.Usage
 
+	// 如果有传入的累积用量，先复制
+	if accumUsage != nil {
+		totalUsage = *accumUsage
+	}
+
 	// 从 LLM 响应的 GenerationInfo 中提取 Token 用量
 	// langchaingo 将 usage 信息放在 ContentChoice.GenerationInfo 中
 	if choice.GenerationInfo != nil {
 		if v, ok := choice.GenerationInfo["PromptTokens"]; ok {
 			if n, ok := v.(int); ok {
-				totalUsage.PromptTokens = n
+				totalUsage.PromptTokens += n
 			}
 		}
 		if v, ok := choice.GenerationInfo["CompletionTokens"]; ok {
 			if n, ok := v.(int); ok {
-				totalUsage.CompletionTokens = n
+				totalUsage.CompletionTokens += n
 			}
 		}
 		if v, ok := choice.GenerationInfo["TotalTokens"]; ok {
 			if n, ok := v.(int); ok {
-				totalUsage.TotalTokens = n
+				totalUsage.TotalTokens += n
 			}
 		}
-		// 如果 TotalTokens 为 0，自动计算
-		if totalUsage.TotalTokens == 0 && (totalUsage.PromptTokens > 0 || totalUsage.CompletionTokens > 0) {
-			totalUsage.TotalTokens = totalUsage.PromptTokens + totalUsage.CompletionTokens
-		}
+	}
+	// 如果 TotalTokens 为 0，用 PromptTokens + CompletionTokens 计算
+	if totalUsage.TotalTokens == 0 && (totalUsage.PromptTokens > 0 || totalUsage.CompletionTokens > 0) {
+		totalUsage.TotalTokens = totalUsage.PromptTokens + totalUsage.CompletionTokens
 	}
 
 	// 从 ContentChoice 中获取文本内容和工具调用
@@ -595,7 +605,13 @@ func (a *Agent) handleLLMResponse(ctx context.Context, resp *llms.ContentRespons
 
 	// 如果有工具调用，执行工具并将结果回传 LLM
 	if len(toolCalls) > 0 {
-		return a.handleLangChainToolCalls(ctx, toolCalls, &totalUsage, iteration)
+		history := make(map[string]int)
+		if len(callHistory) > 0 && callHistory[0] != nil {
+			for k, v := range callHistory[0] {
+				history[k] = v
+			}
+		}
+		return a.handleLangChainToolCalls(ctx, toolCalls, &totalUsage, iteration, history)
 	}
 
 	// LLM 直接回复（普通对话或帮助类问题）
@@ -609,13 +625,17 @@ func (a *Agent) handleLLMResponse(ctx context.Context, resp *llms.ContentRespons
 		Timestamp:  time.Now(),
 	}
 }
-
-// handleLangChainToolCalls 处理 LangChain 格式的工具调用
 // 这是 ReAct 模式的核心：LLM 决定调用什么工具 → 执行工具 → 结果回传 LLM → LLM 生成最终回复
 // iteration: 当前迭代次数，用于防止无限循环
-func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.ToolCall, totalUsage *llm.Usage, iteration int) *AgentResponse {
-	// 重复工具调用检测：追踪本次迭代中调用的工具名称
-	seenTools := make(map[string]int) // toolName → 连续调用次数
+// toolCallHistory: 跨轮次的工具调用历史（toolName → 调用次数），用于检测跨轮次重复调用
+func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.ToolCall, totalUsage *llm.Usage, iteration int, toolCallHistory ...map[string]int) *AgentResponse {
+	// 合并跨轮次的工具调用历史
+	callHistory := make(map[string]int)
+	if len(toolCallHistory) > 0 && toolCallHistory[0] != nil {
+		for k, v := range toolCallHistory[0] {
+			callHistory[k] = v
+		}
+	}
 
 	for _, tc := range toolCalls {
 		a.setState(StateExecuting)
@@ -628,9 +648,11 @@ func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.T
 			toolArgs = tc.FunctionCall.Arguments
 		}
 
-		// 检测重复工具调用：同一工具在同一轮中被连续调用
-		seenTools[toolName]++
-		if seenTools[toolName] > 2 {
+		// 记录工具调用（跨轮次累计）
+		callHistory[toolName]++
+
+		// 检测跨轮次重复调用：同一工具在整个 ReAct 链路中被调用超过 3 次
+		if callHistory[toolName] > 3 {
 			// 同一工具被重复调用过多，跳出循环防止无限循环
 			a.setState(StateError)
 			errMsg := fmt.Sprintf("工具 %s 被重复调用多次，可能当前操作已完成但系统未正确识别。", toolName)
@@ -731,7 +753,7 @@ func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.T
 			Timestamp: time.Now(),
 		}
 	}
-	return a.handleLLMResponse(ctx, resp, nextIteration)
+	return a.handleLLMResponseWithUsage(ctx, resp, nextIteration, totalUsage, callHistory)
 }
 
 // processLocal 本地 fallback 处理（不使用 LLM）
