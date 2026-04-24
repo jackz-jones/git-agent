@@ -10,9 +10,10 @@
 2. [意图解析器（Interpreter）](#2-意图解析器interpreter)
 3. [工具筛选与上下文感知](#3-工具筛选与上下文感知)
 4. [ReAct 循环与终止性工具](#4-react-循环与终止性工具)
-5. [系统提示词调校](#5-系统提示词调校)
-6. [常见问题排查](#6-常见问题排查)
-7. [调校清单](#7-调校清单)
+5. [SKILL/RULE 按需加载系统](#5-skillrule-按需加载系统)
+6. [系统提示词调校](#6-系统提示词调校)
+7. [常见问题排查](#7-常见问题排查)
+8. [调校清单](#8-调校清单)
 
 ---
 
@@ -48,8 +49,9 @@ flowchart TD
 | 文件 | 职责 |
 |------|------|
 | `internal/interpreter/interpreter.go` | 意图解析：关键词匹配 + 评分 + 否定上下文处理 |
+| `internal/promptkit/promptkit.go` | SKILL/RULE 按需加载器：动态组装提示词 |
 | `internal/agent/agent.go` | 工具筛选、ReAct 循环、终止性工具检测、重复调用防护 |
-| `internal/llm/prompts.go` | 系统提示词：角色定义、操作指引、格式要求 |
+| `internal/llm/prompts.go` | 系统提示词骨架：角色定义 |
 | `internal/llm/tools.go` | 工具定义：工具名称、描述、参数 |
 
 ---
@@ -280,9 +282,165 @@ generate your final response to the user NOW.]
 
 ---
 
-## 5. 系统提示词调校
+## 5. SKILL/RULE 按需加载系统
 
-### 5.1 关键规则
+### 5.1 设计背景
+
+之前的调校方式是将所有规则硬编码在 `prompts.go` 和 `tools.go` 中。这导致：
+
+1. **修改规则需要改源码**：每次调整都要改代码、重新编译
+2. **所有规则全量注入**：LLM 每次都收到所有规则，小模型"注意力超载"
+3. **不同模型需求不同**：GPT-4o 能处理复杂规则，7B 小模型需要精简规则
+4. **规则之间冲突**："必须先 view_diff" 和 "直接执行不要犹豫" 在小模型上互相矛盾
+
+### 5.2 架构设计
+
+```
+┌─────────────────────────────────────────────────────┐
+│  internal/promptkit/resources/  ← 内置（embed）      │
+│  ├── skills/                                        │
+│  │   ├── commit-message.md    ← Commit message 规范 │
+│  │   ├── batch-commit.md      ← 分批提交指引        │
+│  │   ├── push-fail-guide.md   ← 推送失败提示规则    │
+│  │   ├── conflict-resolution.md ← 冲突处理指引      │
+│  │   ├── display-format.md    ← 输出格式规范        │
+│  │   └── version-restore.md   ← 版本恢复指引        │
+│  └── rules/                                         │
+│      ├── always-execute.md    ← 直接执行规则        │
+│      ├── no-repeat-tools.md   ← 不重复调用规则      │
+│      └── no-git-terms.md      ← 术语翻译规则        │
+│                                                     │
+│  ~/.config/git-agent/         ← 用户自定义（覆盖内置）│
+│  ├── skills/                                        │
+│  └── rules/                                         │
+│                                                     │
+│  .git-agent/                  ← 项目级（覆盖用户级） │
+│  ├── skills/                                        │
+│  └── rules/                                         │
+└─────────────────────────────────────────────────────┘
+```
+
+**覆盖优先级**：内置 < 用户级 < 项目级
+
+### 5.3 Skill vs Rule
+
+| 类型 | 定义 | 特点 | 示例 |
+|------|------|------|------|
+| **Skill** | 具体的操作知识 | 关联特定意图，按需加载 | Commit message 撰写规范、冲突处理步骤 |
+| **Rule** | 行为约束/禁止 | 可关联意图或全局生效 | 直接执行不犹豫、不使用 git 术语 |
+
+### 5.4 Markdown 文件格式
+
+每个 Skill/Rule 是一个 Markdown 文件，第一行可选 meta 注释：
+
+```markdown
+<!-- meta: {"intents":["save_version","submit_change"],"priority":10,"description":"Commit message 规范"} -->
+
+# Commit Message 撰写规范
+
+具体的规则内容...
+```
+
+**meta 字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `intents` | string[] | 关联的意图列表，当意图命中时加载此 Skill/Rule |
+| `priority` | int | 排序优先级，数字越小越靠前（默认50） |
+| `description` | string | 简短描述 |
+
+如果 meta 行缺失，系统会根据文件名推断 `intents` 和 `description`。
+
+### 5.5 按需加载机制
+
+```mermaid
+flowchart TD
+    A[用户输入] --> B[意图解析]
+    B --> C[检测意图类型]
+    C --> D[promptKit.GetPromptForIntents]
+    D --> E{加载哪些 Skill/Rule?}
+    E -->|意图关联的| F[commit-message, always-execute 等]
+    E -->|全局的（无 intents）| G[no-git-terms]
+    F --> H[按 priority 排序]
+    G --> H
+    H --> I[注入到 LLM system message]
+```
+
+**加载策略**：
+- 意图关联的 Skill/Rule：只在对应意图被触发时加载
+- 全局 Rule（`intents` 为空）：始终加载
+- Priority 排序：Rule 一般 priority 较小（1-10），确保行为约束在 Skill 之前
+
+### 5.6 如何新增 Skill/Rule
+
+#### 方式1：添加内置 Skill/Rule（需改源码）
+
+1. 在 `internal/promptkit/resources/skills/` 或 `rules/` 下创建 `.md` 文件
+2. 添加 meta 行指定 intents 和 priority
+3. 重新编译
+
+**示例**：添加一个"模型专用规则"——在 `rules/` 下创建 `small-model-hints.md`：
+
+```markdown
+<!-- meta: {"intents":["save_version","submit_change"],"priority":3,"description":"小模型精简规则"} -->
+
+# 小模型操作提示
+- 用户说"提交"时，直接调用 save_version 工具，一步到位
+- 不要先查看再操作，直接执行
+```
+
+#### 方式2：用户自定义 Skill/Rule（无需改源码）
+
+1. 在 `~/.config/git-agent/skills/` 或 `rules/` 下创建同名 `.md` 文件
+2. 文件名与内置文件名相同则覆盖，不同则新增
+3. **保存即生效**，无需重启（fsnotify 热加载，300ms 防抖）
+
+**示例**：覆盖内置的 commit-message 规则——创建 `~/.config/git-agent/skills/commit-message.md`
+
+#### 方式3：项目级 Skill/Rule（团队共享）
+
+1. 在仓库根目录下创建 `.git-agent/skills/` 或 `rules/` 目录
+2. 添加 `.md` 文件
+3. 可以提交到仓库，团队共享
+4. 同样支持热加载，保存即生效
+
+### 5.7 禁用 Skill/Rule
+
+在配置中添加禁用列表：
+
+```go
+// 创建 Kit 时传入禁用列表
+kit := promptkit.NewKit(promptkit.ResourcesFS, promptkit.Config{
+    Disabled: []string{"display-format"}, // 禁用 display-format skill
+})
+```
+
+### 5.8 当前内置的 Skill/Rule 清单
+
+#### Skills（操作知识）
+
+| 名称 | 关联意图 | Priority | 说明 |
+|------|----------|----------|------|
+| `commit-message` | save_version, submit_change | 10 | Commit message 撰写规范 |
+| `batch-commit` | save_version, submit_change | 20 | 分批提交操作指引 |
+| `conflict-resolution` | detect_conflict, approve_merge | 20 | 冲突处理指引 |
+| `version-restore` | restore_version | 20 | 版本恢复操作指引 |
+| `push-fail-guide` | submit_change, push | 30 | 推送失败的友好提示规则 |
+| `display-format` | view_history, view_status | 30 | 输出格式规范 |
+
+#### Rules（行为约束）
+
+| 名称 | 关联意图 | Priority | 说明 |
+|------|----------|----------|------|
+| `no-git-terms` | （全局） | 1 | 不向用户暴露 git 术语 |
+| `always-execute` | save_version, submit_change 等 | 5 | 直接执行操作，不要只给建议 |
+| `no-repeat-tools` | save_version, submit_change 等 | 6 | 避免重复调用工具 |
+
+---
+
+## 6. 系统提示词调校
+
+### 6.1 关键规则
 
 系统提示词中与工具调用行为直接相关的规则：
 
@@ -293,7 +451,7 @@ generate your final response to the user NOW.]
 | **保存版本时的操作规范** | 操作指引 | view_diff 后立即调用 save_version，不要插入文字 |
 | **分批提交时避免循环** | 操作指引 | 每次提交只 view_diff + save_version 一次 |
 
-### 5.2 工具描述调校
+### 6.2 工具描述调校
 
 工具描述（`tools.go`）是 LLM 选择工具的主要依据。关键调校点：
 
@@ -301,7 +459,7 @@ generate your final response to the user NOW.]
 - **`submit_change` 描述**：同上，并强调"不要在 view_diff 和 submit_change 之间插入文字说明或建议"
 - 工具描述中的"**重要规则**"标记会引起 LLM 注意，比普通文本更有效
 
-### 5.3 调校原则
+### 6.3 调校原则
 
 1. **具体而非笼统**：❌ "不要重复调用" → ✅ "如果对话历史中已有 view_diff 的结果，直接基于该结果调用本工具"
 2. **正面指令优于负面禁令**：❌ "不要在中间插入文字" → ✅ "应连续完成操作"（但负面禁令也有效，可以并用）
@@ -310,7 +468,7 @@ generate your final response to the user NOW.]
 
 ---
 
-## 6. 常见问题排查
+## 7. 常见问题排查
 
 ### 问题1：意图解析错误（"还有哪些修改没提交的"被识别为 save_version）
 
@@ -396,7 +554,7 @@ generate your final response to the user NOW.]
 
 ---
 
-## 7. 调校清单
+## 8. 调校清单
 
 当遇到 LLM 行为异常时，按以下清单逐项排查：
 
@@ -423,6 +581,16 @@ generate your final response to the user NOW.]
 - [ ] 工具描述中是否包含"已有结果时直接使用"的指引？
 - [ ] 工具描述是否过于复杂导致小模型理解困难？
 - [ ] 关键规则是否使用了强调标记（加粗、大写等）？
+
+### SKILL/RULE 层
+- [ ] 意图对应的 Skill/Rule 是否正确加载？（查看 `promptKit.ListAll()`）
+- [ ] 用户自定义的 Skill/Rule 是否正确覆盖了内置版本？
+- [ ] Skill 的 priority 排序是否合理？（Rule 应在 Skill 之前）
+- [ ] 是否需要为特定模型禁用某些 Skill？（如小模型禁用 display-format）
+- [ ] 全局 Rule（如 no-git-terms）是否始终生效？
+- [ ] 新增意图时，是否在 Skill/Rule 的 meta.intents 中添加了对应意图？
+- [ ] 编辑 .md 文件后是否热加载生效？（查看日志中 `[promptkit] Skills/Rules 热重载完成`）
+- [ ] fsnotify 监听是否正常启动？（查看日志中 `[promptkit] 监听目录`）
 
 ### 模型能力层
 - [ ] 当前模型是否支持 function calling？（某些本地模型不支持）

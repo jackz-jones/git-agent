@@ -160,7 +160,7 @@ func (p *Planner) CreatePlan(intent *interpreter.UserIntent) (*Plan, error) {
 func (p *Planner) planSaveVersion(intent *interpreter.UserIntent) []*Step {
 	message := intent.Params["message"]
 	if message == "" {
-		message = "chore: save changes"
+		message = "chore: save pending changes (auto-generated, please specify)"
 	}
 
 	file := intent.Params["file"]

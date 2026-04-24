@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackz-jones/git-agent/internal/interpreter"
 	"github.com/jackz-jones/git-agent/internal/llm"
 	"github.com/jackz-jones/git-agent/internal/planner"
+	"github.com/jackz-jones/git-agent/internal/promptkit"
 	"github.com/jackz-jones/git-agent/internal/repository"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/openai"
@@ -85,6 +87,7 @@ type Agent struct {
 	toolDefs     []llms.Tool           // LangChain 工具定义（用于 function calling）
 	currentTools []llms.Tool           // 当前对话轮次使用的工具子集（智能筛选后）
 	toolRegistry *llm.GitToolRegistry  // 工具注册中心
+	promptKit    *promptkit.Kit        // Skills/Rules 按需加载器
 
 	// 事件通道
 	inputChan  chan string
@@ -149,6 +152,24 @@ func NewWithLLM(repoPath string, userConfig *UserConfig, llmConfig *LLMConfig) (
 
 	a.llmConfig = llmConfig
 
+	// 初始化 Skills/Rules 按需加载器
+	userConfigDir := promptkit.GetUserConfigDir()
+	projectConfigDir := promptkit.GetProjectConfigDir(repoPath)
+	a.promptKit = promptkit.NewKit(promptkit.ResourcesFS, promptkit.Config{
+		UserDir:    userConfigDir,
+		ProjectDir: projectConfigDir,
+	})
+	if err := a.promptKit.Load(); err != nil {
+		// 加载失败不阻塞，只记录日志
+		_ = err
+	}
+
+	// 启动热加载：监听用户级和项目级目录的文件变更
+	if err := a.promptKit.WatchAndHotReload(); err != nil {
+		// 热加载启动失败不影响正常使用
+		log.Printf("[agent] 热加载监听启动失败: %v", err)
+	}
+
 	// 使用 LangChain Go 创建 LLM 实例
 	lcLLM, err := llm.NewLangChainLLM(llm.OpenAIConfig{
 		APIKey:  llmConfig.APIKey,
@@ -170,9 +191,10 @@ func NewWithLLM(repoPath string, userConfig *UserConfig, llmConfig *LLMConfig) (
 		return nil, fmt.Errorf("没有注册任何工具定义，LLM 模式需要至少一个工具")
 	}
 
-	// 初始化对话上下文，加入系统提示词
+	// 初始化对话上下文，加入系统提示词（骨架 + 动态注入的全局规则）
+	systemPrompt := a.buildSystemPrompt("")
 	a.chatHistory = append(a.chatHistory,
-		llms.TextParts(llms.ChatMessageTypeSystem, llm.SystemPrompt),
+		llms.TextParts(llms.ChatMessageTypeSystem, systemPrompt),
 	)
 
 	return a, nil
@@ -185,14 +207,42 @@ func (a *Agent) registerToolExecutors() {
 		if err := a.ensureUserConfig(); err != nil {
 			return "", err
 		}
-		message := toString(params["message"], "chore: save changes")
-		files := toString(params["files"], "")
-		if files != "" {
-			result, err := a.gitWrapper.SaveVersion(message, strings.Split(files, ","), a.userConfig.Name, a.userConfig.Email)
-			return toJSONResult(result, err)
+		message := toString(params["message"], "chore: save pending changes (auto-generated, please specify)")
+		// 校验 message 质量：拒绝过于笼统的描述
+		if isVagueCommitMessage(message) {
+			// 自动获取 diff 摘要，帮助 LLM 重写具体的 commit message
+			diffHint := ""
+			if diffResult, diffErr := a.gitWrapper.Diff(""); diffErr == nil && diffResult != "" {
+				// 截取前 500 字符作为提示
+				runes := []rune(diffResult)
+				if len(runes) > 500 {
+					diffHint = string(runes[:500]) + "..."
+				} else {
+					diffHint = diffResult
+				}
+			}
+			errMsg := fmt.Sprintf("commit message '%s' is too vague. Please write a specific message that describes WHAT was changed.", message)
+			if diffHint != "" {
+				errMsg += fmt.Sprintf(" Here is a summary of the current changes:\n%s\nPlease rewrite the commit message based on the changes above.", diffHint)
+			} else {
+				errMsg += " Examples: 'feat: add commit_hash param to view_diff', 'fix: resolve nil pointer in Diff method'. Do NOT use generic phrases like 'update files' or 'change code'."
+			}
+			return "", fmt.Errorf("%s", errMsg)
 		}
-		result, err := a.gitWrapper.SaveVersion(message, nil, a.userConfig.Name, a.userConfig.Email)
-		return toJSONResult(result, err)
+		files := toString(params["files"], "")
+		var result interface{}
+		var err error
+		if files != "" {
+			result, err = a.gitWrapper.SaveVersion(message, strings.Split(files, ","), a.userConfig.Name, a.userConfig.Email)
+		} else {
+			result, err = a.gitWrapper.SaveVersion(message, nil, a.userConfig.Name, a.userConfig.Email)
+		}
+		if err != nil {
+			return "", err
+		}
+		// 成功保存后，给 LLM 明确信号：操作已完成，不要再查看 diff 或 status
+		jsonResult, _ := toJSONResult(result, nil)
+		return jsonResult + "\n[Version saved successfully. Do NOT call view_diff or view_status to verify - just inform the user the save was successful.]", nil
 	})
 
 	// view_history
@@ -222,10 +272,20 @@ func (a *Agent) registerToolExecutors() {
 		commitHash := toString(params["commit_hash"], "")
 		if commitHash != "" {
 			result, err := a.gitWrapper.CommitDiff(commitHash)
-			return toJSONResult(result, err)
+			if err != nil {
+				return "", err
+			}
+			return result, nil
 		}
 		result, err := a.gitWrapper.Diff(file)
-		return toJSONResult(result, err)
+		if err != nil {
+			return "", err
+		}
+		// 当没有修改时，给 LLM 更明确的指示，避免它反复调用 view_diff
+		if result == "没有发现修改" {
+			return "没有发现修改。当前工作区与已保存版本完全一致，没有任何差异。请直接基于此信息回复用户，不要再次调用 view_diff 或 view_status。", nil
+		}
+		return result, nil
 	})
 
 	// view_status
@@ -240,6 +300,26 @@ func (a *Agent) registerToolExecutors() {
 			return "", err
 		}
 		message := toString(params["message"], "chore: submit changes to team")
+		// 校验 message 质量：拒绝过于笼统的描述
+		if isVagueCommitMessage(message) {
+			// 自动获取 diff 摘要，帮助 LLM 重写具体的 commit message
+			diffHint := ""
+			if diffResult, diffErr := a.gitWrapper.Diff(""); diffErr == nil && diffResult != "" {
+				runes := []rune(diffResult)
+				if len(runes) > 500 {
+					diffHint = string(runes[:500]) + "..."
+				} else {
+					diffHint = diffResult
+				}
+			}
+			errMsg := fmt.Sprintf("commit message '%s' is too vague. Please write a specific message that describes WHAT was changed.", message)
+			if diffHint != "" {
+				errMsg += fmt.Sprintf(" Here is a summary of the current changes:\n%s\nPlease rewrite the commit message based on the changes above.", diffHint)
+			} else {
+				errMsg += " Examples: 'feat: add HTTPS auth support for push', 'fix: resolve merge conflict detection edge case'. Do NOT use generic phrases like 'update files' or 'change code'."
+			}
+			return "", fmt.Errorf("%s", errMsg)
+		}
 		if err := a.gitWrapper.AddAll(); err != nil {
 			return "", err
 		}
@@ -248,10 +328,11 @@ func (a *Agent) registerToolExecutors() {
 			return "", err
 		}
 		remote := "origin"
-		if err := a.gitWrapper.Push(remote); err != nil {
+		pushErr := a.gitWrapper.Push(remote)
+		if pushErr != nil {
 			// 推送失败但本地保存成功，返回部分成功信息
 			var authErr *gitwrapper.AuthError
-			if errors.As(err, &authErr) {
+			if errors.As(pushErr, &authErr) {
 				return toJSONResult(map[string]string{
 					"hash":          hash,
 					"push_error":    "auth_failed",
@@ -260,11 +341,12 @@ func (a *Agent) registerToolExecutors() {
 			}
 			return toJSONResult(map[string]string{
 				"hash":          hash,
-				"push_error":    err.Error(),
-				"error_message": translateError(err),
+				"push_error":    pushErr.Error(),
+				"error_message": translateError(pushErr),
 			}, nil)
 		}
-		return toJSONResult(map[string]string{"hash": hash}, nil)
+		// 成功提交并推送后，给 LLM 明确信号
+		return toJSONResult(map[string]string{"hash": hash, "status": "submitted_and_pushed"}, nil)
 	})
 
 	// view_team_change
@@ -412,7 +494,7 @@ const maxReActIterations = 5
 // intentToolMapping 意图到工具名称的映射
 // 用于智能筛选发送给 LLM 的工具，避免小模型被过多工具干扰
 var intentToolMapping = map[string][]string{
-	"save_version":     {"save_version", "view_status", "view_diff", "update_user_info"},
+	"save_version":     {"save_version", "view_status", "update_user_info"},
 	"view_history":     {"view_history", "view_status"},
 	"restore_version":  {"restore_version", "view_history", "view_diff"},
 	"view_diff":        {"view_diff", "view_status"},
@@ -430,6 +512,70 @@ var intentToolMapping = map[string][]string{
 	"detect_conflict":  {"detect_conflict", "resolve_conflict", "view_status"},
 	"help":             {"view_status", "view_history"},
 	"update_user_info": {"update_user_info"},
+}
+
+// buildSystemPrompt 构建系统提示词
+// basePrompt: 基础骨架提示词（不含意图相关内容）
+// intent: 当前意图（用于按需加载关联的 Skills/Rules），空字符串表示只加载全局规则
+func (a *Agent) buildSystemPrompt(intent string) string {
+	var sb strings.Builder
+
+	// 1. 角色骨架（始终包含，保持精简）
+	sb.WriteString(`你是一个文件版本管理助手（Git Agent），专门帮助不懂技术的办公人员管理文件版本。
+
+## 你的角色
+- 你是用户的文件管家，帮助用户保存、查看、恢复文件版本
+- 你用简单易懂的办公语言与用户交流，绝不使用 git 术语
+- 你将用户的自然语言需求转化为具体的版本管理操作
+
+## 你能做的事情
+1. 保存文件版本 — 用户编辑完文件后，帮他们保存一个新版本
+2. 查看修改历史 — 查看某个文件或整个仓库的修改记录
+3. 恢复旧版本 — 把文件恢复到之前的某个版本
+4. 查看修改内容 — 对比不同版本之间的差异
+5. 查看当前状态 — 看看有哪些文件被修改了，以及本地是否领先远程
+6. 团队协作 — 提交修改给团队、查看同事的修改、合并他人的修改
+7. 分支管理 — 创建和切换工作副本（分支）
+8. 冲突处理 — 检测和解决多人同时编辑产生的冲突
+9. 同步仓库 — 推送修改到远程、拉取最新内容
+10. 仓库管理 — 初始化和创建文档仓库
+
+## 注意事项
+- 操作前先确认用户意图，如果模糊可以追问
+- 涉及恢复/合并等不可逆操作时，先提醒用户确认
+- 出现冲突时，用通俗语言解释冲突原因，并给出建议
+- 每次操作完成后，可以建议用户接下来可能想做的事情
+- 绝对不要向用户暴露任何 git 命令或技术术语
+
+## 输出要求
+当你需要执行操作时，请调用对应的工具函数。系统会自动执行并将结果返回给你。
+然后你需要把执行结果用用户友好的语言转述给用户。
+`)
+
+	// 2. 动态注入 Skills/Rules
+	if a.promptKit != nil {
+		intents := []string{}
+		if intent != "" {
+			intents = append(intents, intent)
+		}
+		dynamicPrompt := a.promptKit.GetPromptForIntents(intents)
+		if dynamicPrompt != "" {
+			sb.WriteString("\n")
+			sb.WriteString(dynamicPrompt)
+		}
+	}
+
+	return sb.String()
+}
+
+// detectIntentType 检测用户输入的意图类型
+// 复用 interpreter 的解析结果，返回意图名称字符串
+func (a *Agent) detectIntentType(input string) string {
+	intent, err := a.interpreter.Parse(input)
+	if err != nil || intent == nil {
+		return ""
+	}
+	return string(intent.Type)
 }
 
 // selectRelevantTools 根据用户输入智能筛选相关工具
@@ -462,18 +608,39 @@ func (a *Agent) selectRelevantTools(input string) []llms.Tool {
 		relevantNames = append(relevantNames, "view_status")
 	}
 	
-	// 根据名称筛选工具
+	// 上下文感知优化：如果 chat history 中已有 view_diff 的结果，
+	// 从工具列表中移除 view_diff，避免 LLM 重复查看而不执行操作
+	if a.hasToolResultInHistory("view_diff") {
+		filtered := make([]string, 0, len(relevantNames))
+		for _, name := range relevantNames {
+			if name != "view_diff" && name != "detect_conflict" {
+				filtered = append(filtered, name)
+			}
+		}
+		relevantNames = filtered
+	}
+	
+	// 根据名称筛选工具，并将操作类工具排在前面
+	// 这样 LLM 更倾向于调用操作类工具而非查看类工具
 	nameSet := make(map[string]bool, len(relevantNames))
 	for _, name := range relevantNames {
 		nameSet[name] = true
 	}
 	
-	var result []llms.Tool
+	var actionTools []llms.Tool
+	var viewTools []llms.Tool
 	for _, tool := range a.toolDefs {
 		if nameSet[tool.Function.Name] {
-			result = append(result, tool)
+			if strings.HasPrefix(tool.Function.Name, "view_") || tool.Function.Name == "detect_conflict" {
+				viewTools = append(viewTools, tool)
+			} else {
+				actionTools = append(actionTools, tool)
+			}
 		}
 	}
+	
+	// 操作类工具排在前面，查看类工具排在后面
+	result := append(actionTools, viewTools...)
 	
 	// 如果筛选结果为空，回退到全量工具
 	if len(result) == 0 {
@@ -481,6 +648,23 @@ func (a *Agent) selectRelevantTools(input string) []llms.Tool {
 	}
 	
 	return result
+}
+
+// hasToolResultInHistory 检查 chat history 中是否已有某个工具的执行结果
+// 用于避免 LLM 重复调用查看类工具
+func (a *Agent) hasToolResultInHistory(toolName string) bool {
+	for _, msg := range a.chatHistory {
+		if msg.Role == llms.ChatMessageTypeTool {
+			for _, part := range msg.Parts {
+				if resp, ok := part.(llms.ToolCallResponse); ok {
+					if resp.Name == toolName {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // IsLLMEnabled 检查 LLM 是否已启用
@@ -502,6 +686,23 @@ func (a *Agent) Process(ctx context.Context, input string) *AgentResponse {
 // 核心流程：用户输入 → LLM 推理（可能调用工具） → 执行工具 → 结果回传 LLM → 生成回复
 func (a *Agent) processWithLLM(ctx context.Context, input string) *AgentResponse {
 	a.setState(StateThinking)
+
+	// 智能工具筛选：先用本地 interpreter 预判意图，只发送相关工具给 LLM
+	// 这对于小模型（如 7B）特别重要，工具太多会导致模型不调用任何工具
+	a.currentTools = a.selectRelevantTools(input)
+
+	// 按需注入意图相关的 Skills/Rules
+	// 在用户输入前插入一条系统提示，告知 LLM 当前操作应遵循的规则
+	if a.promptKit != nil {
+		intent := a.detectIntentType(input)
+		intentPrompt := a.promptKit.GetPromptForIntents([]string{intent})
+		if intentPrompt != "" {
+			a.chatHistory = append(a.chatHistory,
+				llms.TextParts(llms.ChatMessageTypeSystem,
+					"[当前操作的适用规则]\n"+intentPrompt),
+			)
+		}
+	}
 
 	// 将用户输入加入对话上下文
 	a.chatHistory = append(a.chatHistory,
@@ -637,6 +838,16 @@ func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.T
 		}
 	}
 
+	// 检测是否有"终止性工具"成功执行
+	// save_version 和 submit_change 成功后，操作已完成，LLM 不需要再调用任何工具
+	terminalToolCalled := false
+	terminalTools := map[string]bool{
+		"save_version":   true,
+		"submit_change":  true,
+		"push_to_remote": true,
+		"restore_version": true,
+	}
+
 	for _, tc := range toolCalls {
 		a.setState(StateExecuting)
 
@@ -651,8 +862,14 @@ func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.T
 		// 记录工具调用（跨轮次累计）
 		callHistory[toolName]++
 
-		// 检测跨轮次重复调用：同一工具在整个 ReAct 链路中被调用超过 3 次
-		if callHistory[toolName] > 3 {
+		// 检测跨轮次重复调用：区分查看类工具和操作类工具
+		// 查看类工具（view_*）是幂等的，重复调用毫无意义，2次即终止
+		// 操作类工具允许稍多重试，3次终止
+		maxCallsForTool := 3
+		if strings.HasPrefix(toolName, "view_") || toolName == "detect_conflict" {
+			maxCallsForTool = 2
+		}
+		if callHistory[toolName] > maxCallsForTool {
 			// 同一工具被重复调用过多，跳出循环防止无限循环
 			a.setState(StateError)
 			errMsg := fmt.Sprintf("工具 %s 被重复调用多次，可能当前操作已完成但系统未正确识别。", toolName)
@@ -701,14 +918,24 @@ func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.T
 			}
 		}
 
+		// 检测终止性工具：成功执行后标记操作已完成
+		if terminalTools[toolName] && err == nil {
+			terminalToolCalled = true
+		}
+
 		// 将工具执行结果加入对话历史
+		// 对重复调用的查看类工具，在结果中附加终止提示，引导 LLM 直接生成回复
+		resultContent := result
+		if callHistory[toolName] >= 2 && (strings.HasPrefix(toolName, "view_") || toolName == "detect_conflict") {
+			resultContent = result + "\n\n[SYSTEM NOTICE: You have already called " + toolName + " " + fmt.Sprintf("%d", callHistory[toolName]) + " times. Do NOT call this tool again. Use the information above to generate your final response to the user NOW.]"
+		}
 		a.chatHistory = append(a.chatHistory, llms.MessageContent{
 			Role: llms.ChatMessageTypeTool,
 			Parts: []llms.ContentPart{
 				llms.ToolCallResponse{
 					ToolCallID: tc.ID,
 					Name:       toolName,
-					Content:    result,
+					Content:    resultContent,
 				},
 			},
 		})
@@ -716,14 +943,40 @@ func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.T
 
 	// 将工具执行结果回传 LLM，让它生成最终回复
 	a.setState(StateThinking)
-	resp, err := a.langchainLLM.GenerateContent(
-		ctx,
-		a.chatHistory,
-		llms.WithTools(a.currentTools), // 使用当前轮次筛选后的工具
-		llms.WithToolChoice("auto"), // 显式指定 auto，确保 Ollama 等兼容 API 启用工具调用
+
+	// 关键优化：如果终止性工具已成功执行，从工具列表中移除查看类工具
+	// 这样 LLM 仍能进行第二次 save_version（分批提交场景），但不会反复 view_diff 确认
+	toolsForLLM := a.currentTools
+	if terminalToolCalled {
+		// 过滤掉查看类工具，只保留操作类工具
+		var filteredTools []llms.Tool
+		for _, tool := range a.currentTools {
+			name := tool.Function.Name
+			if !strings.HasPrefix(name, "view_") && name != "detect_conflict" {
+				filteredTools = append(filteredTools, tool)
+			}
+		}
+		toolsForLLM = filteredTools
+		// 如果过滤后没有工具了，设为 nil 让 LLM 生成纯文本
+		if len(toolsForLLM) == 0 {
+			toolsForLLM = nil
+		}
+	}
+
+	// 构建 LLM 调用选项
+	opts := []llms.CallOption{
 		llms.WithTemperature(0.1),
 		llms.WithMaxTokens(a.llmConfig.MaxTokens),
 		openai.WithLegacyMaxTokensField(), // 兼容 Ollama、DeepSeek 等非 OpenAI API
+	}
+	if len(toolsForLLM) > 0 {
+		opts = append(opts, llms.WithTools(toolsForLLM), llms.WithToolChoice("auto"))
+	}
+
+	resp, err := a.langchainLLM.GenerateContent(
+		ctx,
+		a.chatHistory,
+		opts...,
 	)
 	if err != nil {
 		a.setState(StateIdle)
@@ -1181,6 +1434,10 @@ func (a *Agent) ensureUserConfig() error {
 
 // Close 关闭 Agent，释放资源
 func (a *Agent) Close() {
+	// 关闭 Skills/Rules 热加载监听器
+	if a.promptKit != nil {
+		a.promptKit.Close()
+	}
 	close(a.inputChan)
 	close(a.outputChan)
 }
@@ -1359,4 +1616,52 @@ func trimSpace(s string) string {
 		end--
 	}
 	return s[start:end]
+}
+
+// isVagueCommitMessage 检查 commit message 是否过于笼统
+// 返回 true 表示 message 太笼统，应该拒绝
+func isVagueCommitMessage(message string) bool {
+	if message == "" {
+		return true
+	}
+
+	// 提取 conventional commit 的 summary 部分（去掉 type: 前缀）
+	summary := message
+	if idx := strings.Index(message, ":"); idx >= 0 && idx < 20 {
+		summary = strings.TrimSpace(message[idx+1:])
+	}
+
+	// 笼统模式列表：这些短语出现在 summary 中则判定为笼统
+	vaguePatterns := []string{
+		"update files",
+		"update code",
+		"update source code",
+		"update source code files",
+		"update documentation files",
+		"update doc files",
+		"save changes",
+		"save pending changes",
+		"submit changes",
+		"commit changes",
+		"add changes",
+		"make changes",
+		"modify files",
+		"modify code",
+		"change files",
+		"change code",
+	}
+
+	lowerSummary := strings.ToLower(summary)
+	for _, pattern := range vaguePatterns {
+		if lowerSummary == pattern || strings.Contains(lowerSummary, pattern) {
+			return true
+		}
+	}
+
+	// 如果 summary 太短（少于 10 个字符），也可能太笼统
+	if len(summary) < 10 {
+		return true
+	}
+
+	return false
 }

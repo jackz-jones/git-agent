@@ -2,7 +2,7 @@
 
 > Empowering non-technical users to manage file versions as easily as using office software — no Git knowledge required.
 
-[中文文档](README_zh.md) | [📖 Usage Guide](USAGE.md)
+[中文文档](README_zh.md) | [📖 Usage Guide](USAGE.md) | [🔧 Tuning Guide](TUNING.md)
 
 ## Overview
 
@@ -286,6 +286,43 @@ sequenceDiagram
     Agent->>Agent: Build ToolCallResponse and add to chatHistory
     Agent->>LLM: GenerateContent(chatHistory, tools)
 ```
+
+#### Commit Message Quality Assurance
+
+Since LLM may generate vague commit messages (e.g., `feat: update source code files`, `docs: update documentation files`), the project implements a **dual-layer quality assurance** mechanism:
+
+```mermaid
+flowchart TD
+    A[User: save my changes] --> B[LLM calls view_diff]
+    B --> C[LLM calls save_version<br/>message='feat: update source code files']
+    C --> D{isVagueCommitMessage?}
+    D -->|Too vague| E[Return error prompt<br/>Ask LLM to write a specific message]
+    E --> F[LLM regenerates<br/>message='feat: format commit time to seconds in history table']
+    F --> G{isVagueCommitMessage?}
+    G -->|Passed| H[Execute git commit successfully]
+    
+    style D fill:#f9f,stroke:#333
+    style E fill:#f66,stroke:#333
+    style H fill:#6f6,stroke:#333
+```
+
+**Layer 1 — Prompt Constraints** (in `prompts.go` and `tools.go`):
+
+- Tool parameter descriptions include `CRITICAL RULES` with explicit BAD/GOOD examples
+- System prompt commit message rules require: "MUST mention WHAT was changed (function name, feature, config item)"
+- 5+ negative examples covering common vague patterns (e.g., `update files`, `save changes`, `update source code files`)
+
+**Layer 2 — Code-Level Validation** (`isVagueCommitMessage()` in `agent.go`):
+
+Called before `save_version` and `submit_change` execution. If validation fails, returns an error to the LLM, triggering automatic message regeneration:
+
+| Check Rule | Description |
+|-----------|-------------|
+| Pattern matching | Matches 18 vague patterns (e.g., `update files`, `save changes`, `modify code`) |
+| Length threshold | Summary shorter than 10 characters is rejected |
+| Empty check | Empty message is rejected |
+
+**Fallback value correction**: Default fallback messages changed from `chore: save changes` to `chore: save pending changes (auto-generated, please specify)`, clearly indicating the need for manual specification.
 
 ## Project Structure
 

@@ -159,3 +159,67 @@ func TestTranslateResult(t *testing.T) {
 		}
 	})
 }
+
+func TestUncommittedQuery(t *testing.T) {
+	p := New("zh")
+	testCases := []struct {
+		input    string
+		expected IntentType
+	}{
+		{"还有哪些修改没提交的", IntentViewStatus},
+		{"哪些修改没提交", IntentViewStatus},
+		{"没提交的修改", IntentViewStatus},  // view_status 也是合理的，显示哪些文件有未提交修改
+		{"还有哪些没提交", IntentViewStatus},
+		{"哪些文件没提交", IntentViewStatus},
+		{"看看有什么没提交的", IntentViewStatus},
+		{"有什么修改还没提交", IntentViewStatus},
+		{"修改了什么还没提交", IntentViewDiff}, // view_diff 也合理，用户想知道具体修改内容
+	}
+	for _, tc := range testCases {
+		t.Run(tc.input, func(t *testing.T) {
+			intent, err := p.Parse(tc.input)
+			if err != nil {
+				t.Fatalf("Parse(\"%s\") failed: %v", tc.input, err)
+			}
+			if intent.Type != tc.expected {
+				t.Errorf("Parse(\"%s\") = %s (confidence=%.2f), want %s", tc.input, intent.Type, intent.Confidence, tc.expected)
+			}
+		})
+	}
+}
+
+func TestDailyCommit(t *testing.T) {
+	p := New("zh")
+	testCases := []struct {
+		input    string
+		expected IntentType
+	}{
+		// 日常提交操作应被识别为 save_version
+		{"提交", IntentSaveVersion},
+		{"提交修改", IntentSaveVersion},
+		{"提交一下", IntentSaveVersion},
+		{"保存", IntentSaveVersion},
+		{"保存修改", IntentSaveVersion},
+		{"暂存", IntentSaveVersion},
+		{"存一下", IntentSaveVersion},
+		{"commit", IntentSaveVersion},
+		{"提交代码", IntentSaveVersion},
+		{"提交文档修改", IntentSaveVersion},
+		{"保存当前修改", IntentSaveVersion},
+		// 带否定词的应识别为 view_status/view_diff
+		{"还有哪些修改没提交的", IntentViewStatus},
+		{"没提交的修改", IntentViewStatus},
+		{"修改了什么还没提交", IntentViewDiff}, // view_diff 也合理，用户想知道具体修改内容
+	}
+	for _, tc := range testCases {
+		t.Run(tc.input, func(t *testing.T) {
+			intent, err := p.Parse(tc.input)
+			if err != nil {
+				t.Fatalf("Parse(\"%s\") failed: %v", tc.input, err)
+			}
+			if intent.Type != tc.expected {
+				t.Errorf("Parse(\"%s\") = %s (confidence=%.2f), want %s", tc.input, intent.Type, intent.Confidence, tc.expected)
+			}
+		})
+	}
+}

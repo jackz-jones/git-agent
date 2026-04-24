@@ -138,7 +138,10 @@ func (i *Interpreter) initPatterns() {
 			intentType: IntentViewStatus,
 			keywords: []string{"状态", "当前状态", "什么情况", "status", "有没有改", "哪些文件改了",
 				"当前情况", "现在状态", "查看状态", "看看状态", "什么改动", "有哪些修改",
-				"有什么变化", "改了没有", "有什么改动"},
+				"有什么变化", "改了没有", "有什么改动",
+				"没提交", "未提交", "哪些没提交", "哪些未提交", "没提交的", "未提交的",
+				"哪些文件没提交", "哪些修改没提交", "还有什么没提交", "还有哪些没提交",
+				"有没有没提交的", "有什么没提交的", "看看有没有没提交的"},
 			extractor: extractViewStatus,
 		},
 		// 创建分支
@@ -292,6 +295,16 @@ func (i *Interpreter) matchScoreEx(input string, keywords []string) (float64, in
 	score := 0.0
 	maxKwLen := 0
 
+	// 否定词检测：如果输入包含否定上下文，后续会降低操作类意图的分数
+	negativeContext := strings.Contains(input, "没提交") ||
+		strings.Contains(input, "未提交") ||
+		strings.Contains(input, "没有提交") ||
+		strings.Contains(input, "没保存") ||
+		strings.Contains(input, "未保存") ||
+		strings.Contains(input, "不用提交") ||
+		strings.Contains(input, "不要提交") ||
+		strings.Contains(input, "不提交")
+
 	for _, kw := range keywords {
 		kwLower := strings.ToLower(kw)
 		if strings.Contains(input, kwLower) {
@@ -309,6 +322,23 @@ func (i *Interpreter) matchScoreEx(input string, keywords []string) (float64, in
 			}
 			if kwRuneLen > maxKwLen {
 				maxKwLen = kwRuneLen
+			}
+		}
+	}
+
+	// 否定上下文惩罚：如果输入包含"没提交/未提交"等否定词，
+	// 降低 save_version/submit_change 等操作意图的分数
+	// 因为用户说"没提交"是查看意图，不是操作意图
+	if negativeContext && score > 0 {
+		// 检查是否是操作类关键词（提交、保存、存等）导致的匹配
+		for _, kw := range keywords {
+			kwLower := strings.ToLower(kw)
+			if strings.Contains(input, kwLower) {
+				// 如果命中了操作类关键词，且输入是否定上下文，大幅降分
+				if kwLower == "提交" || kwLower == "保存" || kwLower == "存" ||
+					kwLower == "commit" || kwLower == "save" {
+					score -= 0.25 // 惩罚分数，让查看类意图优先
+				}
 			}
 		}
 	}

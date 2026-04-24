@@ -12,13 +12,13 @@ type GitAgentTool struct {
 var AllGitAgentTools = []GitAgentTool{
 	{
 		Name:        "save_version",
-		Description: "保存当前文件修改为新版本。用户完成编辑后使用此功能保存。**重要：调用此工具前，必须先调用 view_diff 查看实际修改内容，基于 diff 结果撰写具体的 commit message，不可凭空猜测。**",
+		Description: "保存当前文件修改为新版本。用户完成编辑后使用此功能保存。**重要规则**：直接调用本工具即可，系统会自动查看修改内容来生成 commit message。你只需提供 commit message 参数。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"message": map[string]any{
 					"type":        "string",
-					"description": "Commit message in English. MUST be based on the actual diff content you just viewed. Use conventional commit style: 'type: summary'. IMPORTANT: Determine type by the FILE EXTENSION being modified, not by the purpose. If ANY .go/.py/.ts/.cpp/.java/.rs etc. source code file is modified, use 'feat' (even if the change is documentation-related). Only use 'docs' when ONLY .md/.txt/.rst etc. doc files are changed. Type priority: fix>feat>refactor>perf>docs>style>test>chore. E.g. 'feat: add commit_hash param to view_diff' (NOT just 'docs: update files')",
+					"description": "Commit message in English. Use conventional commit style: 'type: summary'. Be specific - mention WHAT was changed. BAD: 'update files', 'save changes'. GOOD: 'feat: add commit_hash param to view_diff', 'docs: add CLI usage guide'. Type rules: fix(bug fix) > feat(source code change) > refactor > perf > docs(doc-only change) > style > test > chore. If ANY source code file (.go/.py/.ts/.cpp etc.) is modified, use feat, not docs.",
 				},
 				"files": map[string]any{
 					"type":        "string",
@@ -93,13 +93,13 @@ var AllGitAgentTools = []GitAgentTool{
 	},
 	{
 		Name:        "submit_change",
-		Description: "将修改提交给团队审核。会先保存版本，再推送到远程仓库。**重要：调用此工具前，必须先调用 view_diff 查看实际修改内容，基于 diff 结果撰写具体的 commit message，不可凭空猜测。**",
+		Description: "将修改提交给团队审核。会先保存版本，再推送到远程仓库。**重要规则**：直接调用本工具即可，系统会自动查看修改内容来生成 commit message。你只需提供 commit message 参数。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"message": map[string]any{
 					"type":        "string",
-					"description": "Commit message in English. MUST be based on the actual diff content you just viewed. Use conventional commit style: 'type: summary'. IMPORTANT: Determine type by the FILE EXTENSION being modified, not by the purpose. If ANY .go/.py/.ts/.cpp/.java/.rs etc. source code file is modified, use 'feat' (even if the change is documentation-related). Only use 'docs' when ONLY .md/.txt/.rst etc. doc files are changed. Type priority: fix>feat>refactor>perf>docs>style>test>chore. E.g. 'feat: add HTTPS auth support for push' (NOT just 'chore: submit changes')",
+					"description": "Commit message in English. Use conventional commit style: 'type: summary'. Be specific - mention WHAT was changed. BAD: 'submit changes', 'update files'. GOOD: 'feat: add HTTPS auth support for push', 'fix: resolve merge conflict detection'. Type rules: fix(bug fix) > feat(source code change) > refactor > perf > docs(doc-only change) > style > test > chore. If ANY source code file (.go/.py/.ts/.cpp etc.) is modified, use feat, not docs.",
 				},
 			},
 			"required": []string{"message"},

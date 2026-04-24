@@ -1,6 +1,6 @@
 # Git Agent 🤖
 
-[English](README.md) | 中文 | [📖 使用指南](USAGE_zh.md)
+[English](README.md) | 中文 | [📖 使用指南](USAGE_zh.md) | [🔧 调校指南](TUNING.md)
 
 > 让完全不懂 git 的普通用户，也能像使用办公软件一样管理文件版本。
 
@@ -286,6 +286,43 @@ sequenceDiagram
     Agent->>Agent: 构建 ToolCallResponse 加入 chatHistory
     Agent->>LLM: GenerateContent(chatHistory, tools)
 ```
+
+#### Commit Message 质量保障
+
+由于 LLM 可能生成笼统的 commit message（如 `feat: update source code files`、`docs: update documentation files`），项目实现了**双层质量保障**机制：
+
+```mermaid
+flowchart TD
+    A[用户: 保存一下] --> B[LLM 调用 view_diff]
+    B --> C[LLM 调用 save_version<br/>message='feat: update source code files']
+    C --> D{isVagueCommitMessage?}
+    D -->|太笼统| E[返回错误提示<br/>要求 LLM 写具体的 message]
+    E --> F[LLM 重新生成<br/>message='feat: format commit time to seconds in history table']
+    F --> G{isVagueCommitMessage?}
+    G -->|通过| H[执行 git commit 成功]
+    
+    style D fill:#f9f,stroke:#333
+    style E fill:#f66,stroke:#333
+    style H fill:#6f6,stroke:#333
+```
+
+**第一层 — 提示词约束**（`prompts.go` 和 `tools.go`）：
+
+- 工具参数描述中加入 `CRITICAL RULES`，明确列出 BAD/GOOD 示例对比
+- System Prompt 的 commit message 规则要求："必须具体描述改了什么（函数名、功能点、配置项）"
+- 提供 5+ 个反面示例覆盖常见笼统模式（如 `update files`、`save changes`、`update source code files`）
+
+**第二层 — 代码层硬校验**（`agent.go` 中的 `isVagueCommitMessage()`）：
+
+在 `save_version` 和 `submit_change` 工具执行前调用。校验不通过时返回 error 给 LLM，触发自动重新生成更具体的 message：
+
+| 校验规则 | 说明 |
+|---------|------|
+| 模式匹配 | 匹配 18 种笼统模式（如 `update files`、`save changes`、`modify code`） |
+| 长度阈值 | summary 少于 10 个字符则拒绝 |
+| 空值检查 | 空 message 直接拒绝 |
+
+**Fallback 值修正**：默认 fallback 值从 `chore: save changes` 改为 `chore: save pending changes (auto-generated, please specify)`，明确提示需要手动指定。
 
 ## 代码结构
 

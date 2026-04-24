@@ -2,7 +2,7 @@
 
 > 🎯 本手册面向**完全没有技术背景**的普通用户，手把手教您使用 Git Agent 管理文件版本。
 
-[English Documentation](USAGE.md)
+[English Documentation](USAGE.md) | [🔧 开发者调校指南](TUNING.md)
 
 ---
 
