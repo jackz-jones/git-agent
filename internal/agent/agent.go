@@ -1532,15 +1532,13 @@ func toJSONResult(result interface{}, err error) (string, error) {
 }
 
 // formatAheadBehind 将 ahead/behind 信息格式化为用户友好的同步状态描述
-// 避免同时展示"领先"和"落后"造成歧义，根据实际情况给出明确的状态说明
+// 使用 merge-base 算法后：
+// - ahead = 本地独有的提交数（从 merge-base 到 local HEAD）
+// - behind = 远程独有的提交数（从 merge-base 到 remote HEAD）
+// - ahead > 0 且 behind > 0 表示分叉（双方各有对方没有的提交）
 func formatAheadBehind(ab *gitwrapper.AheadBehind) string {
 	if ab == nil {
 		return ""
-	}
-
-	// 分叉情况（ahead=-1, behind=-1）
-	if ab.Ahead < 0 || ab.Behind < 0 {
-		return "📡 同步状态：本地与远程存在分叉，建议先拉取远程修改再推送本地提交。"
 	}
 
 	// 已同步
@@ -1550,16 +1548,16 @@ func formatAheadBehind(ab *gitwrapper.AheadBehind) string {
 
 	// 仅领先
 	if ab.Ahead > 0 && ab.Behind == 0 {
-		return fmt.Sprintf("📡 同步状态：本地领先远程 %d 个提交，建议推送同步。", ab.Ahead)
+		return fmt.Sprintf("📡 同步状态：本地领先远程 %d 个提交（尚未推送到远程），建议推送同步。", ab.Ahead)
 	}
 
 	// 仅落后
 	if ab.Ahead == 0 && ab.Behind > 0 {
-		return fmt.Sprintf("📡 同步状态：本地落后远程 %d 个提交，建议拉取同步。", ab.Behind)
+		return fmt.Sprintf("📡 同步状态：本地落后远程 %d 个提交（本地尚未同步），建议拉取同步。", ab.Behind)
 	}
 
 	// 同时领先和落后（分叉情况）
-	return fmt.Sprintf("📡 同步状态：本地与远程存在分叉 — 本地有 %d 个未推送的提交，远程有 %d 个未拉取的提交。建议先拉取远程修改（rebase），再推送本地提交。", ab.Ahead, ab.Behind)
+	return fmt.Sprintf("📡 同步状态：本地与远程存在分叉 — 本地有 %d 个提交尚未推送到远程，远程有 %d 个提交本地尚未同步。建议先拉取远程修改（rebase），再推送本地提交。", ab.Ahead, ab.Behind)
 }
 
 // formatVersionTable 将 []gitwrapper.VersionInfo 硬编码格式化为 Markdown 表格

@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v5"
+	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	fdiff "github.com/go-git/go-git/v5/plumbing/format/diff"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
-	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/utils/merkletrie"
 )
 
@@ -49,9 +49,13 @@ type StatusInfo struct {
 }
 
 // AheadBehind 表示本地分支相对远程分支的领先/落后提交数
+// 使用 merge-base 算法计算：
+//   - Ahead = 本地独有的提交数（从 merge-base 到 local HEAD）
+//   - Behind = 远程独有的提交数（从 merge-base 到 remote HEAD）
+//   - Ahead > 0 且 Behind > 0 表示分叉（双方各有对方没有的提交）
 type AheadBehind struct {
-	Ahead  int    `json:"ahead"`   // 本地领先远程的提交数
-	Behind int    `json:"behind"`  // 本地落后远程的提交数
+	Ahead  int    `json:"ahead"`   // 本地领先远程的提交数（本地独有）
+	Behind int    `json:"behind"`  // 本地落后远程的提交数（远程独有）
 	Remote string `json:"remote"`  // 远程仓库名称
 	Branch string `json:"branch"`  // 当前分支名
 }
@@ -1804,6 +1808,10 @@ func (g *GitWrapper) SetLocalUserConfig(name, email string) error {
 }
 
 // GetAheadBehind 获取当前分支相对远程跟踪分支的领先/落后提交数
+// 使用 merge-base 算法：找到本地和远程的最新共同 commit，分别计算独有提交数
+// - ahead = 本地独有的提交数（本地领先远程）
+// - behind = 远程独有的提交数（本地落后远程）
+// - 只有 ahead > 0 且 behind > 0 时才表示真正的分叉
 func (g *GitWrapper) GetAheadBehind() (*AheadBehind, error) {
 	if err := g.ensureRepo(); err != nil {
 		return nil, err
@@ -1839,97 +1847,74 @@ func (g *GitWrapper) GetAheadBehind() (*AheadBehind, error) {
 		}, nil
 	}
 
-	// 通过遍历 commit 链来计算 ahead/behind
-	ahead := 0
-	behind := 0
-
-	// 计算 ahead：从 local HEAD 到 remote HEAD 有多少个 commit
+	// 获取本地和远程的 commit 对象
 	localCommit, err := g.repo.CommitObject(localHash)
 	if err != nil {
 		return nil, fmt.Errorf("获取本地 HEAD 提交失败: %w", err)
 	}
 
-	// 从 local HEAD 往回遍历，直到找到 remote HEAD
-	iter, err := g.repo.Log(&git.LogOptions{From: localHash})
+	remoteCommit, err := g.repo.CommitObject(remoteHash)
 	if err != nil {
-		return nil, fmt.Errorf("获取本地提交历史失败: %w", err)
+		return nil, fmt.Errorf("获取远程 HEAD 提交失败: %w", err)
 	}
 
-	foundRemote := false
-	err = iter.ForEach(func(c *object.Commit) error {
-		if c.Hash == remoteHash {
-			foundRemote = true
-			return fmt.Errorf("stop")
-		}
-		ahead++
-		return nil
-	})
-	if err != nil && err.Error() != "stop" {
-		return nil, err
+	// 使用 MergeBase 找到本地和远程的最近共同祖先
+	mergeBaseCommits, err := localCommit.MergeBase(remoteCommit)
+	if err != nil || len(mergeBaseCommits) == 0 {
+		// 无法找到共同祖先（极端情况），视为分叉
+		return &AheadBehind{
+			Ahead:  -1, // -1 表示分叉
+			Behind: -1,
+			Remote: "origin",
+			Branch: branchName,
+		}, nil
 	}
 
-	if !foundRemote {
-		// remote HEAD 不在 local 的历史中，说明分叉了
-		// 尝试从 remote HEAD 往回遍历
+	// 取第一个作为最近共同祖先（MergeBase 返回按时间倒序的切片）
+	mergeBase := mergeBaseCommits[0]
+	mergeBaseHash := mergeBase.Hash
+
+	// 计算 ahead：从 local HEAD 往回遍历到 merge-base 的提交数
+	ahead := 0
+	if localHash == mergeBaseHash {
 		ahead = 0
-		remoteIter, err := g.repo.Log(&git.LogOptions{From: remoteHash})
-		if err != nil {
-			return nil, nil // 无法确定，返回 nil
-		}
-		foundLocal := false
-		err = remoteIter.ForEach(func(c *object.Commit) error {
-			if c.Hash == localHash {
-				foundLocal = true
-				return fmt.Errorf("stop")
-			}
-			behind++
-			return nil
-		})
-		if err != nil && err.Error() != "stop" {
-			return nil, nil
-		}
-
-		if !foundLocal {
-			// 真正的分叉情况，需要更复杂的 merge-base 计算
-			// 简化处理：只报告分叉
-			return &AheadBehind{
-				Ahead:  -1, // -1 表示分叉
-				Behind: -1,
-				Remote: "origin",
-				Branch: branchName,
-			}, nil
-		}
 	} else {
-		// remote HEAD 在 local 的历史中，计算 behind
-		behind = 0
-		remoteIter, err := g.repo.Log(&git.LogOptions{From: remoteHash})
+		iter, err := g.repo.Log(&git.LogOptions{From: localHash})
 		if err != nil {
-			return &AheadBehind{
-				Ahead:  ahead,
-				Behind: 0,
-				Remote: "origin",
-				Branch: branchName,
-			}, nil
+			return nil, fmt.Errorf("获取本地提交历史失败: %w", err)
 		}
-		err = remoteIter.ForEach(func(c *object.Commit) error {
-			if c.Hash == localHash {
+		err = iter.ForEach(func(c *object.Commit) error {
+			if c.Hash == mergeBaseHash {
 				return fmt.Errorf("stop")
 			}
-			behind++
+			ahead++
 			return nil
 		})
 		if err != nil && err.Error() != "stop" {
-			return &AheadBehind{
-				Ahead:  ahead,
-				Behind: 0,
-				Remote: "origin",
-				Branch: branchName,
-			}, nil
+			return nil, err
 		}
 	}
 
-	// 如果不使用 localCommit 变量，避免编译错误
-	_ = localCommit
+	// 计算 behind：从 remote HEAD 往回遍历到 merge-base 的提交数
+	behind := 0
+	if remoteHash == mergeBaseHash {
+		behind = 0
+	} else {
+		iter, err := g.repo.Log(&git.LogOptions{From: remoteHash})
+		if err != nil {
+			return nil, fmt.Errorf("获取远程提交历史失败: %w", err)
+		}
+		err = iter.ForEach(func(c *object.Commit) error {
+			if c.Hash == mergeBaseHash {
+				return fmt.Errorf("stop")
+			}
+			behind++
+			return nil
+		})
+		if err != nil && err.Error() != "stop" {
+			return nil, err
+		}
+	}
 
 	return &AheadBehind{
 		Ahead:  ahead,

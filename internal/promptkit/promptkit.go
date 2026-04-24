@@ -23,10 +23,16 @@ const (
 	SkillTypeRule  SkillType = "rule"  // 规则：行为约束（如不使用 git 术语）
 )
 
+// dirSubdirToType 子目录名到 SkillType 的映射，用于从目录结构自动推断类型
+var dirSubdirToType = map[string]SkillType{
+	"skills": SkillTypeSkill,
+	"rules":  SkillTypeRule,
+}
+
 // Skill 定义一个可加载的提示词片段
 type Skill struct {
 	Name        string    `json:"name"`         // 唯一标识，如 "commit-message"
-	Type        SkillType `json:"type"`         // skill 或 rule
+	Type        SkillType `json:"type"`         // skill 或 rule，由所在目录自动推断
 	Content     string    `json:"content"`      // Markdown 内容
 	Source      string    `json:"source"`       // 来源：builtin / user / project
 	Intents     []string  `json:"intents"`      // 关联的意图列表，用于按需加载
@@ -48,25 +54,23 @@ type Config struct {
 // Kit 管理所有 Skills 和 Rules
 type Kit struct {
 	mu          sync.RWMutex
-	skills      map[string]*Skill // 所有已加载的 skill（key = name）
-	rules       map[string]*Skill // 所有已加载的 rule（key = name）
+	items       map[string]*Skill   // 所有已加载的 Skill/Rule（key = name，同名覆盖）
 	intentIndex map[string][]string // intent → skill/rule names
-	builtinFS   embed.FS           // 内置资源文件系统
+	builtinFS   embed.FS            // 内置资源文件系统
 	config      Config
 
 	// 热加载相关
-	watcher   *fsnotify.Watcher // 文件监听器
-	done      chan struct{}     // 关闭信号
-	reloadCh  chan struct{}     // 防抖：合并短时间内的多次事件
-	onReload  func()           // 重载完成后的回调（可选，用于日志通知）
-	lastReload time.Time       // 上次重载时间
+	watcher    *fsnotify.Watcher // 文件监听器
+	done       chan struct{}     // 关闭信号
+	reloadCh   chan struct{}     // 防抖：合并短时间内的多次事件
+	onReload   func()           // 重载完成后的回调（可选，用于日志通知）
+	lastReload time.Time        // 上次重载时间
 }
 
 // NewKit 创建一个新的 Kit 实例
 func NewKit(builtinFS embed.FS, config Config) *Kit {
 	k := &Kit{
-		skills:      make(map[string]*Skill),
-		rules:       make(map[string]*Skill),
+		items:       make(map[string]*Skill),
 		intentIndex: make(map[string][]string),
 		builtinFS:   builtinFS,
 		config:      config,
@@ -81,47 +85,73 @@ func (k *Kit) Load() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
-	// 1. 加载内置 Skills
-	if err := k.loadFromFS(k.builtinFS, "skills", SkillTypeSkill, "builtin"); err != nil {
-		return fmt.Errorf("加载内置 Skills 失败: %w", err)
+	// 1. 加载内置资源（从 embed.FS 的 resources/ 目录）
+	if err := k.loadBuiltin(); err != nil {
+		return err
 	}
 
-	// 2. 加载内置 Rules
-	if err := k.loadFromFS(k.builtinFS, "rules", SkillTypeRule, "builtin"); err != nil {
-		return fmt.Errorf("加载内置 Rules 失败: %w", err)
-	}
-
-	// 3. 加载用户自定义（覆盖内置）
+	// 2. 加载用户自定义（覆盖内置）
 	if k.config.UserDir != "" {
-		if err := k.loadFromDir(filepath.Join(k.config.UserDir, "skills"), SkillTypeSkill, "user"); err != nil {
-			// 用户目录不存在不报错，只是跳过
-			_ = err
-		}
-		if err := k.loadFromDir(filepath.Join(k.config.UserDir, "rules"), SkillTypeRule, "user"); err != nil {
-			_ = err
-		}
+		k.loadUserCustom()
 	}
 
-	// 4. 加载项目级（覆盖用户级和内置）
+	// 3. 加载项目级（覆盖用户级和内置）
 	if k.config.ProjectDir != "" {
-		if err := k.loadFromDir(filepath.Join(k.config.ProjectDir, "skills"), SkillTypeSkill, "project"); err != nil {
-			_ = err
-		}
-		if err := k.loadFromDir(filepath.Join(k.config.ProjectDir, "rules"), SkillTypeRule, "project"); err != nil {
-			_ = err
-		}
+		k.loadProjectCustom()
 	}
 
-	// 5. 构建意图索引
+	// 4. 构建意图索引
 	k.buildIntentIndex()
 
-	// 6. 应用禁用列表
+	// 5. 应用禁用列表
 	k.applyDisabled()
 
 	return nil
 }
 
+// loadBuiltin 从内置 embed.FS 加载，自动按子目录名推断类型
+func (k *Kit) loadBuiltin() error {
+	// 遍历 resources/ 下的子目录（skills/、rules/）
+	entries, err := fs.ReadDir(k.builtinFS, "resources")
+	if err != nil {
+		return fmt.Errorf("读取内置资源目录失败: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		subdir := entry.Name()
+		skillType, ok := dirSubdirToType[subdir]
+		if !ok {
+			continue // 忽略未知子目录
+		}
+
+		if err := k.loadFromFS(k.builtinFS, subdir, skillType, "builtin"); err != nil {
+			return fmt.Errorf("加载内置 %s 失败: %w", subdir, err)
+		}
+	}
+	return nil
+}
+
+// loadUserCustom 加载用户级自定义 Skill/Rule
+func (k *Kit) loadUserCustom() {
+	for subdir, skillType := range dirSubdirToType {
+		dir := filepath.Join(k.config.UserDir, subdir)
+		_ = k.loadFromDir(dir, skillType, "user")
+	}
+}
+
+// loadProjectCustom 加载项目级自定义 Skill/Rule
+func (k *Kit) loadProjectCustom() {
+	for subdir, skillType := range dirSubdirToType {
+		dir := filepath.Join(k.config.ProjectDir, subdir)
+		_ = k.loadFromDir(dir, skillType, "project")
+	}
+}
+
 // loadFromFS 从 embed.FS 加载 Skill/Rule
+// subdir 为子目录名（如 "skills"、"rules"），skillType 从 dirSubdirToType 映射获取
 func (k *Kit) loadFromFS(fsys embed.FS, subdir string, skillType SkillType, source string) error {
 	root := "resources/" + subdir
 	entries, err := fs.ReadDir(fsys, root)
@@ -148,6 +178,7 @@ func (k *Kit) loadFromFS(fsys embed.FS, subdir string, skillType SkillType, sour
 }
 
 // loadFromDir 从文件系统目录加载 Skill/Rule
+// skillType 从 dirSubdirToType 映射获取，由调用方传入
 func (k *Kit) loadFromDir(dir string, skillType SkillType, source string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -179,15 +210,18 @@ func (k *Kit) loadFromDir(dir string, skillType SkillType, source string) error 
 //
 // meta 格式示例：
 //   <!-- meta: {"intents":["save_version","submit_change"],"priority":10,"description":"Commit message 规范"} -->
+//
+// 没有 meta 行时：intents 为空（全局生效），description 已默认为 name
 func (k *Kit) parseSkill(name, content string, skillType SkillType, source string) *Skill {
 	skill := &Skill{
-		Name:     name,
-		Type:     skillType,
-		Content:  content,
-		Source:   source,
-		Intents:  []string{},
-		Priority: 50, // 默认优先级
-		Enabled:  true,
+		Name:        name,
+		Type:        skillType,
+		Content:     content,
+		Source:      source,
+		Intents:     []string{},
+		Priority:    50, // 默认优先级
+		Enabled:     true,
+		Description: name, // 默认描述使用文件名
 	}
 
 	// 解析 meta 行
@@ -206,11 +240,8 @@ func (k *Kit) parseSkill(name, content string, skillType SkillType, source strin
 		} else {
 			skill.Content = ""
 		}
-	} else {
-		// 没有 meta 行，根据目录名推断意图
-		skill.Intents = k.inferIntents(name, skillType)
-		skill.Description = k.inferDescription(name, skillType)
 	}
+	// 没有 meta 行时：intents 保持为空（全局生效），description 已默认为 name
 
 	return skill
 }
@@ -277,69 +308,16 @@ func (k *Kit) parseMeta(skill *Skill, metaStr string) {
 	}
 }
 
-// inferIntents 根据名称推断关联意图
-func (k *Kit) inferIntents(name string, skillType SkillType) []string {
-	intentMap := map[string][]string{
-		"commit-message":      {"save_version", "submit_change"},
-		"batch-commit":        {"save_version", "submit_change"},
-		"push-fail-guide":     {"submit_change", "push"},
-		"conflict-resolution": {"detect_conflict", "approve_merge"},
-		"always-execute":      {"save_version", "submit_change", "push", "restore_version", "create_branch", "switch_branch", "create_tag"},
-		"no-repeat-tools":     {"save_version", "submit_change", "view_diff", "view_status", "view_history"},
-		"no-git-terms":        {}, // 全局规则，不关联特定意图
-		"display-format":      {"view_history", "view_status"},
-		"version-restore":     {"restore_version"},
-	}
-
-	if intents, ok := intentMap[name]; ok {
-		return intents
-	}
-	return []string{}
-}
-
-// inferDescription 根据名称推断描述
-func (k *Kit) inferDescription(name string, skillType SkillType) string {
-	descMap := map[string]string{
-		"commit-message":      "Commit message 撰写规范",
-		"batch-commit":        "分批提交操作指引",
-		"push-fail-guide":     "推送失败的友好提示规则",
-		"conflict-resolution": "冲突处理指引",
-		"always-execute":      "直接执行操作，不要只给建议",
-		"no-repeat-tools":     "避免重复调用工具",
-		"no-git-terms":        "不向用户暴露 git 技术术语",
-		"display-format":      "输出格式规范",
-		"version-restore":     "版本恢复操作指引",
-	}
-
-	if desc, ok := descMap[name]; ok {
-		return desc
-	}
-	return name
-}
-
-// register 注册一个 Skill/Rule（覆盖同名）
+// register 注册一个 Skill/Rule（同名覆盖）
 func (k *Kit) register(skill *Skill) {
-	switch skill.Type {
-	case SkillTypeSkill:
-		k.skills[skill.Name] = skill
-	case SkillTypeRule:
-		k.rules[skill.Name] = skill
-	}
+	k.items[skill.Name] = skill
 }
 
 // buildIntentIndex 构建意图→名称索引
 func (k *Kit) buildIntentIndex() {
 	k.intentIndex = make(map[string][]string)
 
-	all := make(map[string]*Skill)
-	for k, v := range k.skills {
-		all[k] = v
-	}
-	for k, v := range k.rules {
-		all[k] = v
-	}
-
-	for name, skill := range all {
+	for name, skill := range k.items {
 		for _, intent := range skill.Intents {
 			k.intentIndex[intent] = append(k.intentIndex[intent], name)
 		}
@@ -353,12 +331,7 @@ func (k *Kit) applyDisabled() {
 		disabledSet[name] = true
 	}
 
-	for name, skill := range k.skills {
-		if disabledSet[name] {
-			skill.Enabled = false
-		}
-	}
-	for name, skill := range k.rules {
+	for name, skill := range k.items {
 		if disabledSet[name] {
 			skill.Enabled = false
 		}
@@ -382,13 +355,8 @@ func (k *Kit) GetPromptForIntents(intents []string) string {
 	}
 
 	// 也加载全局规则（没有关联意图但始终生效）
-	for name, rule := range k.rules {
-		if len(rule.Intents) == 0 && rule.Enabled {
-			nameSet[name] = true
-		}
-	}
-	for name, skill := range k.skills {
-		if len(skill.Intents) == 0 && skill.Enabled {
+	for name, item := range k.items {
+		if len(item.Intents) == 0 && item.Enabled {
 			nameSet[name] = true
 		}
 	}
@@ -401,16 +369,8 @@ func (k *Kit) GetPromptForIntents(intents []string) string {
 		typeName string
 	}
 
-	all := make(map[string]*Skill)
-	for k, v := range k.skills {
-		all[k] = v
-	}
-	for k, v := range k.rules {
-		all[k] = v
-	}
-
 	for name := range nameSet {
-		if skill, ok := all[name]; ok && skill.Enabled {
+		if skill, ok := k.items[name]; ok && skill.Enabled {
 			items = append(items, struct {
 				name     string
 				priority int
@@ -452,7 +412,7 @@ func (k *Kit) GetAllPrompt() string {
 		typeName string
 	}
 
-	for name, skill := range k.skills {
+	for name, skill := range k.items {
 		if skill.Enabled {
 			items = append(items, struct {
 				name     string
@@ -460,16 +420,6 @@ func (k *Kit) GetAllPrompt() string {
 				content  string
 				typeName string
 			}{name, skill.Priority, skill.Content, string(skill.Type)})
-		}
-	}
-	for name, rule := range k.rules {
-		if rule.Enabled {
-			items = append(items, struct {
-				name     string
-				priority int
-				content  string
-				typeName string
-			}{name, rule.Priority, rule.Content, string(rule.Type)})
 		}
 	}
 
@@ -498,11 +448,8 @@ func (k *Kit) ListAll() []Skill {
 	defer k.mu.RUnlock()
 
 	var result []Skill
-	for _, s := range k.skills {
+	for _, s := range k.items {
 		result = append(result, *s)
-	}
-	for _, r := range k.rules {
-		result = append(result, *r)
 	}
 
 	sort.Slice(result, func(i, j int) bool {
@@ -670,52 +617,52 @@ func (k *Kit) watchLoop() {
 }
 
 // Reload 重新加载所有 Skills 和 Rules
-// 保留内置不变，只重新加载用户级和项目级
 func (k *Kit) Reload() {
 	k.mu.Lock()
 
 	// 重新加载：清空后全量加载
-	k.skills = make(map[string]*Skill)
-	k.rules = make(map[string]*Skill)
+	k.items = make(map[string]*Skill)
 	k.intentIndex = make(map[string][]string)
 
-	// 1. 内置 Skills
-	if err := k.loadFromFS(k.builtinFS, "skills", SkillTypeSkill, "builtin"); err != nil {
-		log.Printf("[promptkit] 重新加载内置 Skills 失败: %v", err)
+	// 1. 内置资源
+	if err := k.loadBuiltin(); err != nil {
+		log.Printf("[promptkit] 重新加载内置资源失败: %v", err)
 	}
 
-	// 2. 内置 Rules
-	if err := k.loadFromFS(k.builtinFS, "rules", SkillTypeRule, "builtin"); err != nil {
-		log.Printf("[promptkit] 重新加载内置 Rules 失败: %v", err)
-	}
-
-	// 3. 用户自定义
+	// 2. 用户自定义
 	if k.config.UserDir != "" {
-		_ = k.loadFromDir(filepath.Join(k.config.UserDir, "skills"), SkillTypeSkill, "user")
-		_ = k.loadFromDir(filepath.Join(k.config.UserDir, "rules"), SkillTypeRule, "user")
+		k.loadUserCustom()
 	}
 
-	// 4. 项目级
+	// 3. 项目级
 	if k.config.ProjectDir != "" {
-		_ = k.loadFromDir(filepath.Join(k.config.ProjectDir, "skills"), SkillTypeSkill, "project")
-		_ = k.loadFromDir(filepath.Join(k.config.ProjectDir, "rules"), SkillTypeRule, "project")
+		k.loadProjectCustom()
 	}
 
-	// 5. 重建索引
+	// 4. 重建索引
 	k.buildIntentIndex()
 
-	// 6. 重新应用禁用列表
+	// 5. 重新应用禁用列表
 	k.applyDisabled()
 
 	k.lastReload = time.Now()
 
 	k.mu.Unlock()
 
-	// 7. 动态补充监听新出现的目录（在锁外执行，避免死锁）
+	// 6. 动态补充监听新出现的目录（在锁外执行，避免死锁）
 	k.addNewWatchDirs()
 
-	log.Printf("[promptkit] Skills/Rules 热重载完成 (skills=%d, rules=%d)",
-		len(k.skills), len(k.rules))
+	// 统计各类型数量
+	skillCount, ruleCount := 0, 0
+	for _, item := range k.items {
+		switch item.Type {
+		case SkillTypeSkill:
+			skillCount++
+		case SkillTypeRule:
+			ruleCount++
+		}
+	}
+	log.Printf("[promptkit] Skills/Rules 热重载完成 (skills=%d, rules=%d)", skillCount, ruleCount)
 
 	// 触发回调
 	if k.onReload != nil {

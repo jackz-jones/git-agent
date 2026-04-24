@@ -19,16 +19,16 @@ func TestKitLoad(t *testing.T) {
 		t.Fatal("Expected at least some skills/rules to be loaded")
 	}
 
-	// 验证 commit-message skill 存在
+	// 验证 commit-message rule 存在（已从 skills 移至 rules 目录）
 	found := false
 	for _, s := range skills {
-		if s.Name == "commit-message" && s.Type == SkillTypeSkill {
+		if s.Name == "commit-message" && s.Type == SkillTypeRule {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatal("Expected commit-message skill to be loaded")
+		t.Fatal("Expected commit-message rule to be loaded")
 	}
 
 	// 验证 no-git-terms rule 存在
