@@ -148,7 +148,7 @@ func runInteractive(repoPath, apiKey, baseURL, model string) {
 	fmt.Println()
 
 	reader, err := readline.NewEx(&readline.Config{
-		Prompt:          fmt.Sprintf("\n%s🧠 >%s ", stylePrompt, colorReset),
+		Prompt:          fmt.Sprintf("%s>%s ", stylePrompt, colorReset),
 		HistoryFile:     "/tmp/git-agent-history.tmp",
 		AutoComplete:    completer,
 		InterruptPrompt: "^C",
@@ -165,12 +165,12 @@ func runInteractive(repoPath, apiKey, baseURL, model string) {
 	ctx := context.Background()
 
 	for {
-		// 根据模式动态更新提示符
-		modeIndicator := "📝"
+		// 根据模式动态更新提示符（不含 \n 和 emoji，避免 readline 宽度计算错乱）
+		modeIndicator := "local"
 		if a != nil && a.IsLLMEnabled() {
-			modeIndicator = "🧠"
+			modeIndicator = "llm"
 		}
-		reader.SetPrompt(fmt.Sprintf("\n%s%s >%s ", stylePrompt, modeIndicator, colorReset))
+		reader.SetPrompt(fmt.Sprintf("%s[%s] >%s ", stylePrompt, modeIndicator, colorReset))
 
 		line, err := reader.Readline()
 		if err != nil {
