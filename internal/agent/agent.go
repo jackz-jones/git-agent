@@ -245,13 +245,16 @@ func (a *Agent) registerToolExecutors() {
 		return jsonResult + "\n[Version saved successfully. Do NOT call view_diff or view_status to verify - just inform the user the save was successful.]", nil
 	})
 
-	// view_history
+	// view_history — 硬编码表格格式，不依赖 LLM 或 SKILL 来格式化
 	a.toolRegistry.Register("view_history", func(ctx context.Context, params map[string]interface{}) (string, error) {
 		limit := toInt(params["limit"], 10)
 		author := toString(params["author"], "")
 		file := toString(params["file"], "")
 		result, err := a.gitWrapper.GetHistory(file, limit, author)
-		return toJSONResult(result, err)
+		if err != nil {
+			return "", err
+		}
+		return formatVersionTable(result), nil
 	})
 
 	// restore_version
@@ -288,10 +291,24 @@ func (a *Agent) registerToolExecutors() {
 		return result, nil
 	})
 
-	// view_status
+	// view_status — LatestCommit 部分硬编码表格格式
 	a.toolRegistry.Register("view_status", func(ctx context.Context, params map[string]interface{}) (string, error) {
 		result, err := a.gitWrapper.Status()
-		return toJSONResult(result, err)
+		if err != nil {
+			return "", err
+		}
+		// 将 LatestCommit 硬编码格式化为表格，其余字段保持 JSON
+		data, err := json.Marshal(result)
+		if err != nil {
+			return fmt.Sprintf("%v", result), nil
+		}
+		// 构建 JSON 结果，附加格式化的最新提交表格
+		jsonResult := string(data)
+		if result.LatestCommit != nil {
+			commitTable := formatVersionTable([]gitwrapper.VersionInfo{*result.LatestCommit})
+			jsonResult = jsonResult + "\n\n最新提交：" + commitTable
+		}
+		return jsonResult, nil
 	})
 
 	// submit_change
@@ -349,7 +366,7 @@ func (a *Agent) registerToolExecutors() {
 		return toJSONResult(map[string]string{"hash": hash, "status": "submitted_and_pushed"}, nil)
 	})
 
-	// view_team_change
+	// view_team_change — 硬编码表格格式，不依赖 LLM 或 SKILL 来格式化
 	a.toolRegistry.Register("view_team_change", func(ctx context.Context, params map[string]interface{}) (string, error) {
 		// 先拉取远程最新内容（与本地模式 planViewTeamChange 行为一致）
 		remote := "origin"
@@ -357,7 +374,10 @@ func (a *Agent) registerToolExecutors() {
 		limit := toInt(params["limit"], 10)
 		author := toString(params["author"], "")
 		result, err := a.gitWrapper.Log(limit, author)
-		return toJSONResult(result, err)
+		if err != nil {
+			return "", err
+		}
+		return formatVersionTable(result), nil
 	})
 
 	// merge_branch
@@ -1504,6 +1524,34 @@ func toJSONResult(result interface{}, err error) (string, error) {
 		return fmt.Sprintf("%v", result), nil
 	}
 	return string(data), nil
+}
+
+// formatVersionTable 将 []gitwrapper.VersionInfo 硬编码格式化为 Markdown 表格
+// 这是项目的基本功能，不依赖 SKILL/RULE，确保提交记录展示格式统一
+func formatVersionTable(versions []gitwrapper.VersionInfo) string {
+	if len(versions) == 0 {
+		return "暂无历史记录"
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n")
+	sb.WriteString("| ID | 提交 Hash | 提交人 | 时间 | 修改内容 |\n")
+	sb.WriteString("|-----|----------|--------|------|----------|\n")
+
+	for idx, v := range versions {
+		// 时间精确到秒
+		dateStr := v.Date.Format("2006-01-02 15:04:05")
+		// 清理 message 中的换行
+		message := strings.TrimSpace(strings.ReplaceAll(v.Message, "\n", " "))
+		// 截断过长的 message
+		if len([]rune(message)) > 50 {
+			message = string([]rune(message)[:50]) + "..."
+		}
+		sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %s |\n", idx+1, v.ShortHash, v.Author, dateStr, message))
+	}
+
+	sb.WriteString(fmt.Sprintf("\n共 %d 条提交记录。", len(versions)))
+	return sb.String()
 }
 
 func isConflictError(err error) bool {
