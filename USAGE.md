@@ -2,7 +2,7 @@
 
 > 🎯 This guide is for **absolute beginners** with no technical background. We'll walk you through using Git Agent to manage file versions step by step.
 
-[中文文档](USAGE_zh.md)
+[中文文档](USAGE_zh.md) | [🔧 Tuning Guide](TUNING.md)
 
 ---
 
