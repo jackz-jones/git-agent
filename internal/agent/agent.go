@@ -291,7 +291,7 @@ func (a *Agent) registerToolExecutors() {
 		return result, nil
 	})
 
-	// view_status — LatestCommit 部分硬编码表格格式
+	// view_status — LatestCommit 部分硬编码表格格式，ahead/behind 格式化为用户友好文本
 	a.toolRegistry.Register("view_status", func(ctx context.Context, params map[string]interface{}) (string, error) {
 		result, err := a.gitWrapper.Status()
 		if err != nil {
@@ -302,11 +302,15 @@ func (a *Agent) registerToolExecutors() {
 		if err != nil {
 			return fmt.Sprintf("%v", result), nil
 		}
-		// 构建 JSON 结果，附加格式化的最新提交表格
+		// 构建 JSON 结果，附加格式化的最新提交表格和 ahead/behind 文本
 		jsonResult := string(data)
 		if result.LatestCommit != nil {
 			commitTable := formatVersionTable([]gitwrapper.VersionInfo{*result.LatestCommit})
 			jsonResult = jsonResult + "\n\n最新提交：" + commitTable
+		}
+		// 将 ahead/behind 信息格式化为用户友好的文本
+		if result.AheadBehind != nil {
+			jsonResult = jsonResult + "\n\n" + formatAheadBehind(result.AheadBehind)
 		}
 		return jsonResult, nil
 	})
@@ -1525,6 +1529,37 @@ func toJSONResult(result interface{}, err error) (string, error) {
 		return fmt.Sprintf("%v", result), nil
 	}
 	return string(data), nil
+}
+
+// formatAheadBehind 将 ahead/behind 信息格式化为用户友好的同步状态描述
+// 避免同时展示"领先"和"落后"造成歧义，根据实际情况给出明确的状态说明
+func formatAheadBehind(ab *gitwrapper.AheadBehind) string {
+	if ab == nil {
+		return ""
+	}
+
+	// 分叉情况（ahead=-1, behind=-1）
+	if ab.Ahead < 0 || ab.Behind < 0 {
+		return "📡 同步状态：本地与远程存在分叉，建议先拉取远程修改再推送本地提交。"
+	}
+
+	// 已同步
+	if ab.Ahead == 0 && ab.Behind == 0 {
+		return "📡 同步状态：本地与远程已同步。"
+	}
+
+	// 仅领先
+	if ab.Ahead > 0 && ab.Behind == 0 {
+		return fmt.Sprintf("📡 同步状态：本地领先远程 %d 个提交，建议推送同步。", ab.Ahead)
+	}
+
+	// 仅落后
+	if ab.Ahead == 0 && ab.Behind > 0 {
+		return fmt.Sprintf("📡 同步状态：本地落后远程 %d 个提交，建议拉取同步。", ab.Behind)
+	}
+
+	// 同时领先和落后（分叉情况）
+	return fmt.Sprintf("📡 同步状态：本地与远程存在分叉 — 本地有 %d 个未推送的提交，远程有 %d 个未拉取的提交。建议先拉取远程修改（rebase），再推送本地提交。", ab.Ahead, ab.Behind)
 }
 
 // formatVersionTable 将 []gitwrapper.VersionInfo 硬编码格式化为 Markdown 表格
