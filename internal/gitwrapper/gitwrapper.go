@@ -614,8 +614,12 @@ func (g *GitWrapper) CommitDiff(commitHash string) (string, error) {
 		return "", err
 	}
 
-	hash := plumbing.NewHash(commitHash)
-	commit, err := g.repo.CommitObject(hash)
+	// 使用 ResolveRevision 支持 short hash
+	hash, err := g.repo.ResolveRevision(plumbing.Revision(commitHash))
+	if err != nil {
+		return "", fmt.Errorf("找不到提交 %s: %w", commitHash, err)
+	}
+	commit, err := g.repo.CommitObject(*hash)
 	if err != nil {
 		return "", fmt.Errorf("找不到提交 %s: %w", commitHash, err)
 	}

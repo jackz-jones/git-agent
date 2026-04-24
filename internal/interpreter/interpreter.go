@@ -873,15 +873,18 @@ func buildVersionTable(versions []map[string]interface{}) string {
 		if len(dateStr) > 19 {
 			dateStr = dateStr[:19]
 		}
-		// 清理 message 中的换行
-		message = strings.TrimSpace(strings.ReplaceAll(message, "\n", " "))
-		// 截断过长的 message
-		if len([]rune(message)) > 50 {
-			message = string([]rune(message)[:50]) + "..."
-		}
+		// 清理 message 中的换行和管道符，避免破坏表格格式
+		message = strings.TrimSpace(strings.ReplaceAll(message, "\n", "<br>"))
+		message = strings.ReplaceAll(message, "|", "\\|")
 
 		sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %s |\n", idx+1, shortHash, author, dateStr, message))
 	}
+
+	sb.WriteString(fmt.Sprintf("\n共 %d 条提交记录。", len(versions)))
+	sb.WriteString("\n\n[SYSTEM] 以上表格已经是格式化好的最终展示内容，你必须遵守以下规则：")
+	sb.WriteString("\n1. 必须原样展示完整表格，不得删减列、不得改写表格内容、不得只展示部分列。")
+	sb.WriteString("\n2. 「修改内容」列的内容必须完整展示，不得截断或省略（如末尾出现...省略号则说明你截断了，必须完整输出）。如果内容较长，可在单元格内用<br>换行。")
+	sb.WriteString("\n3. 当用户想查看某个提交的具体修改点时，请调用 view_diff 工具并传入 commit_hash 参数（使用表格中「提交 Hash」列的完整值或短值均可）。不要回复找不到提交记录。")
 
 	return sb.String()
 }
@@ -932,15 +935,18 @@ func formatVersionTable(result interface{}) string {
 		if len(dateStr) > 19 {
 			dateStr = dateStr[:19]
 		}
-		// 清理 message 中的换行
+		// 清理 message 中的换行和管道符，避免破坏表格格式
 		message = strings.TrimSpace(strings.ReplaceAll(message, "\n", " "))
-		// 截断过长的 message
-		if len([]rune(message)) > 50 {
-			message = string([]rune(message)[:50]) + "..."
-		}
+		message = strings.ReplaceAll(message, "|", "\\|")
 
 		sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %s |\n", idx+1, shortHash, author, dateStr, message))
 	}
+
+	sb.WriteString(fmt.Sprintf("\n共 %d 条提交记录。", len(versions)))
+	sb.WriteString("\n\n[SYSTEM] 以上表格已经是格式化好的最终展示内容，你必须遵守以下规则：")
+	sb.WriteString("\n1. 必须原样展示完整表格，不得删减列、不得改写表格内容、不得只展示部分列。")
+	sb.WriteString("\n2. 「修改内容」列的内容必须完整展示，不得截断或省略（如末尾出现...省略号则说明你截断了，必须完整输出）。如果内容较长，可在单元格内用<br>换行。")
+	sb.WriteString("\n3. 当用户想查看某个提交的具体修改点时，请调用 view_diff 工具并传入 commit_hash 参数（使用表格中「提交 Hash」列的完整值或短值均可）。不要回复找不到提交记录。")
 
 	return sb.String()
 }

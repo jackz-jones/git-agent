@@ -570,6 +570,7 @@ func (a *Agent) buildSystemPrompt(intent string) string {
 ## 输出要求
 当你需要执行操作时，请调用对应的工具函数。系统会自动执行并将结果返回给你。
 然后你需要把执行结果用用户友好的语言转述给用户。
+重要：如果工具返回的结果中包含 Markdown 表格，你必须原样展示该表格，不得删减列、不得改写内容、不得只展示部分列。表格已经是最终格式，直接输出即可。
 `)
 
 	// 2. 动态注入 Skills/Rules
@@ -1541,16 +1542,17 @@ func formatVersionTable(versions []gitwrapper.VersionInfo) string {
 	for idx, v := range versions {
 		// 时间精确到秒
 		dateStr := v.Date.Format("2006-01-02 15:04:05")
-		// 清理 message 中的换行
-		message := strings.TrimSpace(strings.ReplaceAll(v.Message, "\n", " "))
-		// 截断过长的 message
-		if len([]rune(message)) > 50 {
-			message = string([]rune(message)[:50]) + "..."
-		}
+		// 清理 message 中的换行和制表符，避免破坏表格格式
+		message := strings.TrimSpace(strings.ReplaceAll(v.Message, "\n", "<br>"))
+		message = strings.ReplaceAll(message, "|", "\\|")
 		sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %s |\n", idx+1, v.ShortHash, v.Author, dateStr, message))
 	}
 
 	sb.WriteString(fmt.Sprintf("\n共 %d 条提交记录。", len(versions)))
+	sb.WriteString("\n\n[SYSTEM] 以上表格已经是格式化好的最终展示内容，你必须遵守以下规则：")
+	sb.WriteString("\n1. 必须原样展示完整表格，不得删减列、不得改写表格内容、不得只展示部分列。")
+	sb.WriteString("\n2. 「修改内容」列的内容必须完整展示，不得截断或省略（如末尾出现...省略号则说明你截断了，必须完整输出）。如果内容较长，可在单元格内用<br>换行。")
+	sb.WriteString("\n3. 当用户想查看某个提交的具体修改点时，请调用 view_diff 工具并传入 commit_hash 参数（使用表格中「提交 Hash」列的完整值或短值均可）。不要回复找不到提交记录。")
 	return sb.String()
 }
 
