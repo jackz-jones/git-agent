@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -9,8 +8,19 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/chzyer/readline"
 	"github.com/jackz-jones/git-agent/internal"
 	"github.com/jackz-jones/git-agent/internal/agent"
+)
+
+// completer 提供简单的命令自动补全
+var completer = readline.NewPrefixCompleter(
+	readline.PcItem("/mode"),
+	readline.PcItem("/mode", readline.PcItem("local"), readline.PcItem("llm")),
+	readline.PcItem("/clear"),
+	readline.PcItem("/reset"),
+	readline.PcItem("exit"),
+	readline.PcItem("quit"),
 )
 
 // ANSI 颜色常量
@@ -137,24 +147,38 @@ func runInteractive(repoPath, apiKey, baseURL, model string) {
 	fmt.Printf("  %s输入「帮助」查看所有操作  输入「退出」结束会话%s\n", colorGray, colorReset)
 	fmt.Println()
 
-	reader := bufio.NewReader(os.Stdin)
+	reader, err := readline.NewEx(&readline.Config{
+		Prompt:          fmt.Sprintf("\n%s🧠 >%s ", stylePrompt, colorReset),
+		HistoryFile:     "/tmp/git-agent-history.tmp",
+		AutoComplete:    completer,
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+		HistoryLimit:    1000,
+		Stdout:          os.Stdout,
+	})
+	if err != nil {
+		fmt.Printf("%s初始化输入失败：%v%s\n", styleError, err, colorReset)
+		return
+	}
+	defer reader.Close()
+
 	ctx := context.Background()
 
 	for {
-		// 输入提示符 - 简洁醒目
+		// 根据模式动态更新提示符
 		modeIndicator := "📝"
 		if a != nil && a.IsLLMEnabled() {
 			modeIndicator = "🧠"
 		}
-		fmt.Printf("\n%s%s >%s ", stylePrompt, modeIndicator, colorReset)
+		reader.SetPrompt(fmt.Sprintf("\n%s%s >%s ", stylePrompt, modeIndicator, colorReset))
 
-		input, err := reader.ReadString('\n')
+		line, err := reader.Readline()
 		if err != nil {
-			fmt.Printf("%s读取输入失败：%v%s\n", styleError, err, colorReset)
-			continue
+			// readline.ErrInterrupt 表示 Ctrl+C，io.EOF 表示 Ctrl+D
+			break
 		}
 
-		input = strings.TrimSpace(input)
+		input := strings.TrimSpace(line)
 		if input == "" {
 			continue
 		}
