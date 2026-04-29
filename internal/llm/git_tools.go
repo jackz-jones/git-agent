@@ -76,21 +76,6 @@ func (r *GitToolRegistry) Register(name string, executor func(ctx context.Contex
 	r.executors[name] = executor
 }
 
-// BuildTools 构建所有 LangChain Tool 实例
-func (r *GitToolRegistry) BuildTools() []tools.Tool {
-	var result []tools.Tool
-	for _, toolDef := range AllGitAgentTools {
-		executor, ok := r.executors[toolDef.Name]
-		if !ok {
-			continue
-		}
-		tool := NewGitTool(toolDef, executor)
-		r.tools[toolDef.Name] = tool
-		result = append(result, tool)
-	}
-	return result
-}
-
 // BuildToolDefinitions 构建 LangChain llms.Tool 定义列表（用于 function calling）
 // 同时将 GitTool 实例存入 r.tools，以便 GetTool 能找到对应工具执行器
 func (r *GitToolRegistry) BuildToolDefinitions() []llms.Tool {
