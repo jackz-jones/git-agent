@@ -1124,79 +1124,165 @@ func (a *Agent) buildSystemPrompt(intent string) string {
 ```go
 // processWithLLM —— LLM 模式的入口
 func (a *Agent) processWithLLM(ctx context.Context, input string) *AgentResponse {
-    // 1. 智能工具筛选：先用本地 interpreter 预判意图，只发送相关工具
-    a.currentTools = a.selectRelevantTools(input)
+    a.setState(StateThinking)
 
-    // 2. 按需注入意图相关的 Skills/Rules
-    intent := a.detectIntentType(input)
-    if intentPrompt := a.promptKit.GetPromptForIntents([]string{intent}); intentPrompt != "" {
-        a.chatHistory = append(a.chatHistory,
-            llms.TextParts(llms.ChatMessageTypeSystem, "[当前操作的适用规则]\n"+intentPrompt))
+    // 1. 按需注入意图相关的 Skills/Rules
+    //    在用户输入前插入一条系统提示，告知 LLM 当前操作应遵循的规则
+    if a.promptKit != nil {
+        intent := a.detectIntentType(input)
+        intentPrompt := a.promptKit.GetPromptForIntents([]string{intent})
+        if intentPrompt != "" {
+            a.chatHistory = append(a.chatHistory,
+                llms.TextParts(llms.ChatMessageTypeSystem,
+                    "[当前操作的适用规则]\n"+intentPrompt),
+            )
+        }
     }
 
-    // 3. 将用户输入加入对话历史
+    // 2. 将用户输入加入对话上下文
     a.chatHistory = append(a.chatHistory,
-        llms.TextParts(llms.ChatMessageTypeHuman, input))
+        llms.TextParts(llms.ChatMessageTypeHuman, input),
+    )
 
-    // 4. 调用 LLM，携带工具定义
+    // 3. 智能工具筛选：先用本地 interpreter 预判意图，只发送相关工具给 LLM
+    //    这对于小模型（如 7B）特别重要，工具太多会导致模型不调用任何工具
+    a.currentTools = a.selectRelevantTools(input)
+
+    // 4. 调用 LLM，携带筛选后的工具定义（function calling）
     resp, err := a.langchainLLM.GenerateContent(
         ctx,
         a.chatHistory,
-        llms.WithTools(a.currentTools),        // 工具定义
-        llms.WithToolChoice("auto"),            // 自动决定是否调用工具
-        llms.WithTemperature(0.1),             // 低温度，减少幻觉
+        llms.WithTools(a.currentTools),
+        llms.WithToolChoice("auto"),            // 显式指定 auto，确保 Ollama 等兼容 API 启用工具调用
+        llms.WithTemperature(0.1),              // Agent 场景使用低温度，减少幻觉
         llms.WithMaxTokens(a.llmConfig.MaxTokens),
+        openai.WithLegacyMaxTokensField(),      // 兼容 Ollama、DeepSeek 等非 OpenAI API
     )
+    if err != nil {
+        // LLM 调用失败，回退到本地模式
+        a.chatHistory = a.chatHistory[:len(a.chatHistory)-1]
+        return a.fallbackToLocal(ctx, input, err)
+    }
 
-    // 5. 处理 LLM 响应（可能包含工具调用）
+    // 5. 处理 LLM 响应，从第 1 次迭代开始
     return a.handleLLMResponse(ctx, resp, 1)
 }
 
-// handleLLMResponse —— 处理 LLM 的响应
+// handleLLMResponse —— 处理 LLM 响应的入口（委托给 handleLLMResponseWithUsage）
 func (a *Agent) handleLLMResponse(ctx context.Context, resp *llms.ContentResponse, iteration int) *AgentResponse {
+    return a.handleLLMResponseWithUsage(ctx, resp, iteration, nil)
+}
+
+// handleLLMResponseWithUsage —— 处理 LLM 响应（含 token 用量累计）
+func (a *Agent) handleLLMResponseWithUsage(ctx context.Context, resp *llms.ContentResponse,
+    iteration int, accumUsage *llm.Usage, callHistory ...map[string]int) *AgentResponse {
+
     choice := resp.Choices[0]
+    // 从 GenerationInfo 中提取 Token 用量，跨轮次累计
+    var totalUsage llm.Usage
+    if accumUsage != nil { totalUsage = *accumUsage }
+    // ... 从 choice.GenerationInfo 提取 PromptTokens/CompletionTokens/TotalTokens ...
+
+    assistantContent := choice.Content
     toolCalls := choice.ToolCalls
+
+    // 将 assistant 消息加入对话历史（含文本和工具调用）
+    aiParts := []llms.ContentPart{}
+    if assistantContent != "" {
+        aiParts = append(aiParts, llms.TextContent{Text: assistantContent})
+    }
+    for _, tc := range toolCalls {
+        aiParts = append(aiParts, tc)
+    }
+    a.chatHistory = append(a.chatHistory, llms.MessageContent{
+        Role: llms.ChatMessageTypeAI, Parts: aiParts,
+    })
 
     if len(toolCalls) > 0 {
         // LLM 要求调用工具 → 执行工具 → 结果回传 LLM → 递归处理
-        return a.handleLangChainToolCalls(ctx, toolCalls, ...)
+        return a.handleLangChainToolCalls(ctx, toolCalls, &totalUsage, iteration, ...)
     }
 
     // LLM 直接回复文本（没有工具调用）
-    return &AgentResponse{Success: true, Message: choice.Content}
+    return &AgentResponse{Success: true, Message: assistantContent, TokenUsage: &totalUsage}
 }
 
-// handleLangChainToolCalls —— 执行工具调用
-func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.ToolCall, ...) *AgentResponse {
+// handleLangChainToolCalls —— 执行工具调用（核心防循环逻辑）
+func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.ToolCall,
+    totalUsage *llm.Usage, iteration int, toolCallHistory ...map[string]int) *AgentResponse {
+
+    // 合并跨轮次的工具调用历史（用于检测重复调用）
+    callHistory := make(map[string]int)
+    // ... 合并 toolCallHistory ...
+
+    // 终止性工具：save_version/submit_change/push_to_remote/restore_version
+    // 成功执行后，操作已完成，LLM 不需要再调用查看类工具
+    terminalToolCalled := false
+    terminalTools := map[string]bool{
+        "save_version": true, "submit_change": true,
+        "push_to_remote": true, "restore_version": true,
+    }
+
     for _, tc := range toolCalls {
         toolName := tc.FunctionCall.Name
         toolArgs := tc.FunctionCall.Arguments
 
+        // 跨轮次重复调用检测：
+        //   查看类工具（view_*）2 次即终止，操作类工具 3 次终止
+        callHistory[toolName]++
+        maxCalls := 3
+        if strings.HasPrefix(toolName, "view_") { maxCalls = 2 }
+        if callHistory[toolName] > maxCalls {
+            return &AgentResponse{Success: false, Message: "工具被重复调用过多，操作可能已完成"}
+        }
+
         // 通过注册中心执行工具
-        tool, _ := a.toolRegistry.GetTool(toolName)
-        result, _ := tool.Call(ctx, toolArgs)
+        tool, ok := a.toolRegistry.GetTool(toolName)
+        if !ok {
+            // 工具不存在，将错误信息回传 LLM 让它自行修正
+            // ... 加入 chatHistory ...
+            continue
+        }
+        result, err := tool.Call(ctx, toolArgs)
+        // ... 错误处理，AuthError 友好提示 ...
+
+        if terminalTools[toolName] && err == nil {
+            terminalToolCalled = true
+        }
 
         // 将工具结果加入对话历史
+        //   对重复调用的查看类工具，附加 SYSTEM NOTICE 引导 LLM 生成最终回复
         a.chatHistory = append(a.chatHistory, llms.MessageContent{
             Role: llms.ChatMessageTypeTool,
             Parts: []llms.ContentPart{
-                llms.ToolCallResponse{
-                    ToolCallID: tc.ID,
-                    Name:       toolName,
-                    Content:    result,
-                },
+                llms.ToolCallResponse{ToolCallID: tc.ID, Name: toolName, Content: result},
             },
         })
     }
 
-    // 将工具结果回传 LLM，让它生成回复
+    // 将工具执行结果回传 LLM
+    // 关键优化：终止性工具成功后，过滤掉查看类工具，防止 LLM 反复确认
+    toolsForLLM := a.currentTools
+    if terminalToolCalled {
+        var filteredTools []llms.Tool
+        for _, tool := range a.currentTools {
+            name := tool.Function.Name
+            if !strings.HasPrefix(name, "view_") && name != "detect_conflict" {
+                filteredTools = append(filteredTools, tool)
+            }
+        }
+        toolsForLLM = filteredTools
+        if len(toolsForLLM) == 0 { toolsForLLM = nil }
+    }
+
     resp, _ := a.langchainLLM.GenerateContent(ctx, a.chatHistory, ...)
 
     // 递归处理（LLM 可能继续调用工具 = 多轮 ReAct）
-    if iteration+1 > maxReActIterations {  // 防止无限循环
-        return errorResponse("操作陷入循环")
+    nextIteration := iteration + 1
+    if nextIteration > maxReActIterations {
+        return &AgentResponse{Success: false, Message: "操作陷入循环，已自动终止"}
     }
-    return a.handleLLMResponse(ctx, resp, iteration+1)
+    return a.handleLLMResponseWithUsage(ctx, resp, nextIteration, totalUsage, callHistory)
 }
 ```
 
@@ -1204,8 +1290,11 @@ func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.T
 
 1. **递归处理**：LLM 可能一次调用不够，需要多轮（比如先查看状态 → 再保存版本）
 2. **迭代上限**：`maxReActIterations = 5`，防止 LLM 陷入无限循环
-3. **工具结果格式**：工具返回的结果必须是 LLM 能理解的文本（通常是 JSON）
-4. **对话历史管理**：每一轮的消息都加入 chatHistory，LLM 根据完整上下文做决策
+3. **跨轮次重复调用检测**：查看类工具（`view_*`）2 次即终止，操作类工具 3 次终止；同时附加 SYSTEM NOTICE 引导 LLM 生成最终回复
+4. **终止性工具过滤**：`save_version`/`submit_change`/`push_to_remote`/`restore_version` 成功后，从工具列表中移除查看类工具，防止 LLM 反复确认
+5. **Token 用量累计**：`handleLLMResponseWithUsage` 跨轮次累计 token 使用量，最终返回给用户
+6. **LLM 失败回退**：`processWithLLM` 中 LLM 调用失败时，自动回退到 `fallbackToLocal` 本地模式
+7. **对话历史管理**：每一轮的 assistant 消息（含文本和工具调用）都加入 chatHistory，LLM 根据完整上下文做决策
 
 ---
 
