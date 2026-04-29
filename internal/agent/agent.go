@@ -712,10 +712,6 @@ func (a *Agent) Process(ctx context.Context, input string) *AgentResponse {
 func (a *Agent) processWithLLM(ctx context.Context, input string) *AgentResponse {
 	a.setState(StateThinking)
 
-	// 智能工具筛选：先用本地 interpreter 预判意图，只发送相关工具给 LLM
-	// 这对于小模型（如 7B）特别重要，工具太多会导致模型不调用任何工具
-	a.currentTools = a.selectRelevantTools(input)
-
 	// 按需注入意图相关的 Skills/Rules
 	// 在用户输入前插入一条系统提示，告知 LLM 当前操作应遵循的规则
 	if a.promptKit != nil {

@@ -380,9 +380,4 @@ func printHelp() {
 	fmt.Println()
 }
 
-func getEnvOrDefault(key, defaultValue string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
-	}
-	return defaultValue
-}
+

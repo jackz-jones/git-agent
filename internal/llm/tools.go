@@ -282,20 +282,3 @@ var AllGitAgentTools = []GitAgentTool{
 		},
 	},
 }
-
-// GetGitAgentTools 返回 Agent 可用的工具列表（兼容旧接口）
-// 已废弃：请使用 AllGitAgentTools + GitToolRegistry.BuildToolDefinitions()
-func GetGitAgentTools() []Tool {
-	result := make([]Tool, len(AllGitAgentTools))
-	for i, t := range AllGitAgentTools {
-		result[i] = Tool{
-			Type: "function",
-			Function: Function{
-				Name:        t.Name,
-				Description: t.Description,
-				Parameters:  t.Parameters,
-			},
-		}
-	}
-	return result
-}
