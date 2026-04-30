@@ -1,0 +1,50 @@
+# Air 配置文件 - 仅用于开发模式下的后端热加载
+# 使用方式: make dev-server (会自动检测并使用 air)
+# 安装: go install github.com/air-verse/air@latest
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  # 编译命令
+  cmd = "go build -o ./tmp/git-agent ."
+  # 编译产物路径
+  bin = "./tmp/git-agent"
+  # 运行参数：启动 serve 模式，不自动打开浏览器
+  args_bin = ["serve", "--open=false"]
+  # 监听的文件扩展名
+  include_ext = ["go", "tpl", "tmpl", "html"]
+  # 排除目录
+  exclude_dir = ["tmp", "web", "node_modules", "vendor", ".git", ".idea", "docs"]
+  # 排除文件
+  exclude_file = []
+  # 排除正则
+  exclude_regex = ["_test\\.go$"]
+  # 排除不变的目录
+  exclude_unchanged = true
+  # 跟踪符号链接目录
+  follow_symlink = false
+  # 延迟执行（毫秒），避免频繁重启
+  delay = 1000
+  # 发送中断信号后等待旧进程退出的时间
+  kill_delay = 500
+  # 编译失败时停止运行旧二进制
+  stop_on_error = true
+  # 日志输出
+  log = "air.log"
+
+[log]
+  # 显示日志时间
+  time = true
+  # 只显示主日志
+  main_only = false
+
+[color]
+  main = "magenta"
+  watcher = "cyan"
+  build = "yellow"
+  runner = "green"
+
+[misc]
+  # 退出时清理临时目录
+  clean_on_exit = true

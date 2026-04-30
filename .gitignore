@@ -29,3 +29,15 @@ vendor/
 # 调试文件
 debug
 __debug_bin*
+
+# Air 热加载临时目录
+tmp/
+air.log
+
+# Web 前端
+web/node_modules/
+web/dist/
+# Go embed 目标目录：本地开发时会被填充，不提交
+internal/web/dist/*
+!internal/web/dist/README.md
+.codebuddy/

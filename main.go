@@ -68,6 +68,13 @@ func main() {
 			printHelp()
 		case "version":
 			fmt.Println(internal.VersionInfo())
+		case "serve":
+			// 启动本地 Web UI 服务
+			// serve 子命令拥有独立的参数集（见 serve.go），此处将剩余参数透传
+			if err := runServe(flag.Args()[1:]); err != nil {
+				fmt.Printf("%s%v%s\n", styleError, err, colorReset)
+				os.Exit(1)
+			}
 		default:
 			fmt.Printf("%s未知命令: %s%s\n", styleError, cmd, colorReset)
 			fmt.Println("直接运行 git-agent 进入交互模式，或使用 git-agent --help 查看帮助")
@@ -337,6 +344,7 @@ func printHelp() {
 	fmt.Println("  git-agent --api-key KEY                启动交互模式（LLM 模式）")
 	fmt.Println("  git-agent --api-key KEY --base-url URL  指定 LLM API 地址")
 	fmt.Println("  git-agent --api-key KEY --model MODEL   指定 LLM 模型")
+	fmt.Println("  git-agent serve [--port N] [--host H]   启动本地 Web UI 服务")
 
 	fmt.Printf("\n%s参数%s\n", styleBold, colorReset)
 	fmt.Println("  --api-key    LLM API Key")

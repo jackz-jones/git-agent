@@ -1,6 +1,6 @@
 # Git Agent 🤖
 
-[English](README.md) | 中文 | [📖 使用指南](USAGE_zh.md) | [🔧 调校指南](TUNING.md)
+[English](README.md) | 中文 | [📖 使用指南](docs/USAGE_zh.md) | [🔧 调校指南](docs/TUNING.md) | [🌐 Web 模式](docs/web-mode.md)
 
 > 让完全不懂 git 的普通用户，也能像使用办公软件一样管理文件版本。
 
@@ -13,6 +13,11 @@ Git Agent 是一个用 Go 语言实现的 **自然语言驱动的文件版本管
 - 🧠 **LLM 模式**：基于 [LangChain Go](https://github.com/tmc/langchaingo) 框架，通过大语言模型理解用户意图，使用 Function Calling + ReAct 循环智能执行 Git 操作
 - 📝 **本地模式（fallback）**：基于关键词匹配 + 硬编码规划，无需 API Key 即可使用
 
+以及 **双界面访问**：
+
+- 💻 **CLI 模式**：交互式命令行界面，适合终端用户
+- 🌐 **Web 模式**：现代化浏览器界面，包含文件树、状态面板、历史记录、分支管理和 AI 对话助手 —— 适合偏好图形化操作的用户
+
 ## 设计哲学
 
 1. **零 Git 知识门槛** — 用户完全不需要了解任何 git 命令
@@ -22,6 +27,7 @@ Git Agent 是一个用 Go 语言实现的 **自然语言驱动的文件版本管
 5. **优雅降级** — LLM 不可用时自动回退到本地模式
 6. **智能认证策略** — 新仓库默认 HTTPS + 令牌（对新手友好）；已有仓库保持用户已配置的认证方式；SSH 认证自动读取 `~/.ssh/config` 中的 IdentityFile
 7. **提交信息规范** — 自动生成英文 conventional commit 风格的提交信息（feat:/fix:/docs:/refactor:/chore:）
+8. **SKILL/RULE 热加载** — 通过 Markdown 文件进行提示词工程，按意图加载，支持实时热更新
 
 ## 架构设计
 
@@ -31,10 +37,18 @@ Git Agent 是一个用 Go 语言实现的 **自然语言驱动的文件版本管
 graph TB
     subgraph interaction[交互层]
         CLI[命令行交互]
+        WebUI[Web UI<br/>Vue 3 + Element Plus]
+    end
+
+    subgraph web_server[Web 服务器]
+        HTTP[HTTP Server<br/>嵌入式 SPA + REST API]
+        SSE[SSE 流式推送<br/>ReAct 过程实时展示]
+        WS_MGR[Workspace Manager<br/>多目录管理]
     end
 
     subgraph core[Agent 核心]
         AgentCore[Agent Engine<br/>双模式调度]
+        PromptKit[PromptKit<br/>SKILL/RULE 热加载]
     end
 
     subgraph llm_mode[LLM 模式]
@@ -55,6 +69,11 @@ graph TB
     end
 
     CLI --> AgentCore
+    WebUI --> HTTP
+    HTTP --> WS_MGR
+    WS_MGR --> AgentCore
+    SSE --> AgentCore
+    AgentCore --> PromptKit
     AgentCore -->|LLM 可用| LC
     LC --> FC
     FC --> ReAct
@@ -133,399 +152,147 @@ stateDiagram-v2
     Error --> Idle: 重置
 ```
 
-## LangChain Go 集成设计
+## Web UI
 
-### 集成架构
+Web UI 提供了现代化的图形界面来管理文件版本：
 
-项目集成了 [LangChain Go v0.1.14](https://github.com/tmc/langchaingo)，替换了原有的自定义 LLM Provider 实现，使用标准化的框架组件：
+- **首页**：通过系统文件选择器或最近打开记录来打开本地目录
+- **工作区视图**：文件树（左侧）、功能面板（右侧 — 状态/历史/分支）、AI 对话助手（右侧抽屉）
+- **设置页**：配置用户信息、LLM API、HTTP 认证凭据
+- **多工作区**：同时打开和切换多个目录
 
-```mermaid
-graph TB
-    subgraph old[原实现 - 已替换]
-        OldProvider[自定义 Provider 接口]
-        OldMsg[自定义 Message 类型]
-        OldTC[自定义 ToolCall 类型]
-    end
+### 主要功能
 
-    subgraph lc[LangChain Go 实现]
-        LCModel[llms.Model 接口<br/>openai.LLM]
-        MC[llms.MessageContent<br/>System/Human/AI/Tool]
-        TD[llms.Tool + FunctionDefinition<br/>Function Calling]
-        TCR[llms.ToolCallResponse<br/>工具结果回传]
-    end
+| 功能 | 说明 |
+|------|------|
+| **文件树** | 浏览工作区文件，支持语法高亮预览 |
+| **状态面板** | 查看修改/新增/删除的文件，多选提交，一键保存 |
+| **历史面板** | 按作者/关键字筛选提交，查看 diff，回滚 |
+| **分支面板** | 切换/创建分支，推送到远程 |
+| **AI 对话** | 右侧抽屉面板，可折叠的 ReAct 推理步骤，快捷操作，流式响应 |
+| **设置** | 持久化配置 `~/.git-agent/config.json`，LLM 连接测试 |
+| **审计日志** | 破坏性操作记录到 `~/.git-agent/logs/ops.log` |
 
-    subgraph adapt[工具适配层]
-        GTR[GitToolRegistry<br/>工具注册中心]
-        GT[GitTool<br/>tools.Tool 适配器]
-        GAT[GitAgentTool<br/>工具定义]
-    end
+详细 Web 模式文档请参阅 [docs/web-mode.md](docs/web-mode.md)。
 
-    LCModel -->|GenerateContent| MC
-    MC -->|携带工具定义| TD
-    LCModel -->|返回 ToolCalls| TCR
-    GTR -->|BuildToolDefinitions| TD
-    GTR -->|GetTool| GT
-    GAT -->|AllGitAgentTools| GTR
+## SKILL/RULE 系统
 
-    style OldProvider fill:#ffcccc,stroke:#cc0000
-    style OldMsg fill:#ffcccc,stroke:#cc0000
-    style OldTC fill:#ffcccc,stroke:#cc0000
+提示词工程系统使用 **Markdown 文件**，按意图加载，支持热更新：
+
+```
+internal/promptkit/resources/     ← 内置（embed）
+├── skills/                       ← 操作知识（按意图加载）
+│   ├── batch-commit.md
+│   ├── conflict-resolution.md
+│   └── push-fail-guide.md
+└── rules/                        ← 行为约束
+    ├── always-execute.md
+    ├── commit-message.md
+    ├── display-format.md
+    ├── no-git-terms.md
+    ├── no-repeat-tools.md
+    └── version-restore.md
+
+~/.config/git-agent/              ← 用户级覆盖
+.git-agent/                       ← 项目级覆盖（团队共享）
 ```
 
-### 核心改造映射
+**覆盖优先级**：内置 < 用户级 < 项目级
 
-| 改造项 | 原实现 | LangChain Go 实现 |
-|--------|--------|-------------------|
-| LLM 接口 | `llm.Provider` | `llms.Model`（`openai.LLM`） |
-| 对话上下文 | `[]llm.Message` | `[]llms.MessageContent` |
-| 系统提示词 | `SystemChatMessage{Content: ...}` | `TextParts(ChatMessageTypeSystem, ...)` |
-| 用户消息 | `HumanChatMessage{Content: ...}` | `TextParts(ChatMessageTypeHuman, ...)` |
-| AI 消息 | `AIChatMessage{Content, ToolCalls}` | `MessageContent{Role: AI, Parts: [TextContent, ToolCall]}` |
-| 工具定义 | `[]llm.Tool{Function: ...}` | `[]llms.Tool{Function: *FunctionDefinition}` |
-| 工具调用 | `ToolCall.Function.Name` | `ToolCall.FunctionCall.Name`（指针类型） |
-| 工具结果回传 | `ToolChatMessage{ToolCallID, Name}` | `ToolCallResponse{ToolCallID, Name, Content}` |
-| LLM 调用 | `provider.Chat(messages, tools)` | `llm.GenerateContent(ctx, messages, WithTools(...))` |
-| 响应解析 | 遍历 `choice.Parts` | `choice.Content` + `choice.ToolCalls` |
-
-### 工具系统设计
-
-LLM 模式通过 **Function Calling** 机制调用 Git 操作，工具系统分为三层：
-
-```mermaid
-graph TB
-    subgraph def[工具定义层]
-        GAT[GitAgentTool<br/>Name + Description + JSON Schema]
-    end
-
-    subgraph reg[工具注册层]
-        GTR[GitToolRegistry<br/>Register / BuildToolDefinitions / GetTool]
-    end
-
-    subgraph exec[工具执行层]
-        GT[GitTool<br/>implements tools.Tool<br/>Name / Description / Call]
-        EXEC["工具执行器闭包<br/>func(ctx, params) -&gt; (string, error)"]
-    end
-
-    GAT -->|18 个工具定义| GTR
-    GTR -->|注册执行器| EXEC
-    GTR -->|构建定义| TD["[]llms.Tool<br/>用于 Function Calling"]
-    GTR -->|查找工具| GT
-    GT -->|Call| EXEC
-
-    subgraph tools[18 个 Git 工具]
-        T1[save_version]
-        T2[view_history]
-        T3[restore_version]
-        T4[view_diff]
-        T5[view_status]
-        T6[submit_change]
-        T7[view_team_change]
-        T8[merge_branch]
-        T9[init_repo]
-        T10[create_branch]
-        T11[switch_branch]
-        T12[list_branches]
-        T13[create_tag]
-        T14[push_to_remote]
-        T15[pull_from_remote]
-        T16[detect_conflict]
-        T17[resolve_conflict]
-        T18[update_user_info]
-    end
-```
-
-#### 工具定义示例
-
-```go
-// GitAgentTool 结构体
-type GitAgentTool struct {
-    Name        string `json:"name"`
-    Description string `json:"description"`
-    Parameters  any    `json:"parameters"` // JSON Schema
-}
-
-// 示例：save_version 工具
-GitAgentTool{
-    Name:        "save_version",
-    Description: "保存当前文件修改为新版本。用户完成编辑后使用此功能保存。",
-    Parameters: map[string]any{
-        "type": "object",
-        "properties": map[string]any{
-            "message": map[string]any{
-                "type":        "string",
-                "description": "Commit message in English. Summarize the main purpose of ALL file changes. Use conventional commit style, e.g.: 'feat: add Ollama LLM support', 'fix: resolve merge conflict detection'",
-            },
-            "files": map[string]any{
-                "type":        "string",
-                "description": "要保存的文件路径，多个用逗号分隔。留空表示保存所有修改",
-            },
-        },
-        "required": []string{"message"},
-    },
-}
-```
-
-#### 工具调用流程
-
-```mermaid
-sequenceDiagram
-    participant LLM as LLM
-    participant Agent as Agent Engine
-    participant Registry as GitToolRegistry
-    participant Tool as GitTool
-    participant Git as GitWrapper
-
-    LLM->>Agent: ToolCall{ID, FunctionCall{Name, Arguments}}
-    Agent->>Registry: GetTool(name)
-    Registry-->>Agent: GitTool 实例
-    Agent->>Tool: Call(ctx, argumentsJSON)
-    Tool->>Tool: 解析 JSON → params map
-    Tool->>Git: 执行具体 Git 操作
-    Git-->>Tool: 操作结果
-    Tool-->>Agent: 结果字符串
-    Agent->>Agent: 构建 ToolCallResponse 加入 chatHistory
-    Agent->>LLM: GenerateContent(chatHistory, tools)
-```
-
-#### Commit Message 质量保障
-
-由于 LLM 可能生成笼统的 commit message（如 `feat: update source code files`、`docs: update documentation files`），项目实现了**双层质量保障**机制：
-
-```mermaid
-flowchart TD
-    A[用户: 保存一下] --> B[LLM 调用 view_diff]
-    B --> C[LLM 调用 save_version<br/>message='feat: update source code files']
-    C --> D{isVagueCommitMessage?}
-    D -->|太笼统| E[返回错误提示<br/>要求 LLM 写具体的 message]
-    E --> F[LLM 重新生成<br/>message='feat: format commit time to seconds in history table']
-    F --> G{isVagueCommitMessage?}
-    G -->|通过| H[执行 git commit 成功]
-    
-    style D fill:#f9f,stroke:#333
-    style E fill:#f66,stroke:#333
-    style H fill:#6f6,stroke:#333
-```
-
-**第一层 — 提示词约束**（`prompts.go` 和 `tools.go`）：
-
-- 工具参数描述中加入 `CRITICAL RULES`，明确列出 BAD/GOOD 示例对比
-- System Prompt 的 commit message 规则要求："必须具体描述改了什么（函数名、功能点、配置项）"
-- 提供 5+ 个反面示例覆盖常见笼统模式（如 `update files`、`save changes`、`update source code files`）
-
-**第二层 — 代码层硬校验**（`agent.go` 中的 `isVagueCommitMessage()`）：
-
-在 `save_version` 和 `submit_change` 工具执行前调用。校验不通过时返回 error 给 LLM，触发自动重新生成更具体的 message：
-
-| 校验规则 | 说明 |
-|---------|------|
-| 模式匹配 | 匹配 18 种笼统模式（如 `update files`、`save changes`、`modify code`） |
-| 长度阈值 | summary 少于 10 个字符则拒绝 |
-| 空值检查 | 空 message 直接拒绝 |
-
-**Fallback 值修正**：默认 fallback 值从 `chore: save changes` 改为 `chore: save pending changes (auto-generated, please specify)`，明确提示需要手动指定。
+调校和自定义详情请参阅 [docs/TUNING.md](docs/TUNING.md)。
 
 ## 代码结构
 
 ```
 git-agent/
-├── main.go                          # 主程序入口（交互模式、LLM 配置）
+├── main.go                          # 主程序入口（CLI 交互模式、子命令分发）
+├── serve.go                         # Web serve 子命令（配置合并、信号处理）
+├── .air.toml                        # Air 热加载配置（仅开发模式）
+├── Makefile                         # 构建自动化（前端+后端、开发模式、版本注入）
 ├── internal/
 │   ├── version.go                   # 版本信息与 ASCII Logo（通过 ldflags 注入）
-│   ├── agent/agent.go               # Agent 核心引擎（双模式调度、ReAct 循环、状态管理）
+│   ├── agent/
+│   │   ├── agent.go                 # Agent 核心引擎（双模式调度、ReAct 循环、状态管理）
+│   │   └── events.go               # SSE 事件类型（Web 流式推送）
 │   ├── llm/
-│   │   ├── langchain.go             # LangChain LLM 工厂（openai.New 适配）
-│   │   ├── git_tools.go             # 工具注册中心 + GitTool 适配器
-│   │   ├── tools.go                 # 18 个 GitAgentTool 定义
-│   │   ├── prompts.go               # 系统提示词（SystemPrompt、意图解析、规划、冲突分析）
-│   │   └── provider.go              # 兼容保留（Usage、OpenAIConfig 等类型定义）
-│   ├── interpreter/interpreter.go   # 自然语言意图解析（18种意图、参数提取、结果翻译）
-│   ├── planner/planner.go           # 执行规划器（意图 → 多步骤计划）
-│   ├── gitwrapper/gitwrapper.go     # Git 操作封装（面向办公场景的高层接口）
-│   ├── conflict/conflict.go         # 冲突检测与解决（扫描、建议、自动/手动解决）
-│   ├── repository/repository.go     # 仓库管理（创建、克隆、列表）
-│   └── storage/storage.go           # 存储层
-├── Makefile                         # 构建自动化脚本（含版本信息注入）
+│   │   ├── langchain.go            # LangChain LLM 工厂（openai.New 适配）
+│   │   ├── git_tools.go            # 工具注册中心 + GitTool 适配器
+│   │   ├── tools.go                # 18 个 GitAgentTool 定义（含 JSON Schema 参数）
+│   │   └── provider.go             # 兼容保留（Usage、OpenAIConfig 等类型定义）
+│   ├── promptkit/
+│   │   ├── promptkit.go            # SKILL/RULE 加载器（embed + 文件系统，fsnotify 热加载）
+│   │   ├── embed.go                # 嵌入资源 FS
+│   │   └── resources/              # 内置 Skills & Rules（Markdown）
+│   ├── interpreter/interpreter.go  # 自然语言意图解析（18 种意图、评分、否定上下文）
+│   ├── planner/planner.go          # 执行规划器（意图 → 多步骤计划）
+│   ├── gitwrapper/gitwrapper.go    # Git 操作封装（面向办公场景的高层接口）
+│   ├── conflict/conflict.go        # 冲突检测与解决
+│   ├── repository/repository.go    # 仓库管理（创建、克隆、列表）
+│   └── web/
+│       ├── server.go               # HTTP 服务器生命周期（监听、优雅关停）
+│       ├── routes.go               # API 路由注册
+│       ├── workspace.go            # Workspace 管理器（多目录、Agent 生命周期）
+│       ├── handlers_agent_stream.go # SSE 流式推送（ReAct 过程）
+│       ├── handlers_readonly.go    # 只读 API（状态、历史、diff、分支、文件内容）
+│       ├── handlers_write.go       # 写入 API（提交、推送、拉取、分支、标签、初始化）
+│       ├── handlers_settings.go    # 设置 API（配置 CRUD、LLM 测试）
+│       ├── handlers_browse.go      # 文件系统浏览 API
+│       ├── config.go               # 持久化配置存储（~/.git-agent/config.json）
+│       ├── recent.go               # 最近打开目录存储
+│       ├── audit.go                # 破坏性操作审计日志
+│       ├── embed.go                # 前端产物嵌入
+│       ├── pathcheck.go            # 路径穿越防护
+│       └── safepath.go             # 系统目录黑名单
+├── web/                             # 前端（Vue 3 + TypeScript + Element Plus）
+│   ├── src/
+│   │   ├── App.vue                 # 根组件（CSS 变量定义）
+│   │   ├── main.ts                 # Vue 应用启动
+│   │   ├── router.ts              # Vue Router（首页/工作区/设置）
+│   │   ├── api/                   # API 客户端（fetch + SSE 流式）
+│   │   ├── stores/                # Pinia 状态管理（workspaces、agentChat）
+│   │   ├── views/                 # 页面视图（首页、工作区、设置）
+│   │   └── components/workspace/  # 工作区组件（文件树、状态面板等）
+│   ├── vite.config.ts             # Vite 配置（代理 /api → :8088）
+│   └── package.json               # 前端依赖
+├── docs/
+│   ├── USAGE.md                   # 使用指南（英文）
+│   ├── USAGE_zh.md                # 使用指南（中文）
+│   ├── TUNING.md                  # 开发者调校指南
+│   ├── web-mode.md                # Web 模式指南
+│   └── agent-dev-walkthrough.md   # Agent 开发详解
 ├── go.mod
 └── go.sum
 ```
 
-### 核心文件说明
-
-| 文件 | 行数 | 职责 |
-|------|------|------|
-| `main.go` | ~362 | 交互式 CLI、LLM 配置、环境变量、模式切换 |
-| `agent/agent.go` | ~1341 | Agent 核心：双模式调度、LangChain 集成、ReAct 循环、工具注册、状态管理 |
-| `llm/langchain.go` | ~31 | LangChain LLM 工厂，支持 OpenAI/DeepSeek/Azure 等 |
-| `llm/git_tools.go` | ~118 | GitToolRegistry 工具注册中心、GitTool 适配器 |
-| `llm/tools.go` | ~302 | 18 个 GitAgentTool 定义（含 JSON Schema 参数） |
-| `llm/prompts.go` | ~199 | 系统提示词、意图解析提示词、规划提示词、冲突分析提示词 |
-| `llm/provider.go` | ~348 | 兼容保留：Usage、OpenAIConfig 等类型定义 |
-| `internal/version.go` | ~39 | 版本信息与 ASCII Art Logo，通过 ldflags 注入变量 |
-
-## 模块详解
-
-### Interpreter — 意图解析引擎（本地模式）
-
-将用户的自然语言输入解析为结构化的 `UserIntent`，支持 **18 种意图**：
-
-| 意图 | 自然语言示例 | 对应 git 操作 |
-|------|-------------|--------------|
-| `save_version` | "保存修改"、"存一个版本" | `git add` + `git commit` |
-| `view_history` | "查看历史"、"看看修改记录" | `git log` |
-| `restore_version` | "恢复昨天的版本"、"回到之前" | `git checkout` |
-| `view_diff` | "看看改了什么"、"对比差异" | `git diff` |
-| `view_status` | "查看状态"、"有哪些改动" | `git status` |
-| `submit_change` | "提交给团队"、"推送修改" | `git push` |
-| `view_team_change` | "看看小李改了什么" | `git log --author` |
-| `approve_merge` | "合并老王的修改" | `git merge` |
-| `init_repo` | "初始化仓库" | `git init` |
-| `create_branch` | "新建工作分支" | `git branch` |
-| `switch_branch` | "切换到报告分支" | `git checkout` |
-| `list_branches` | "列出工作副本" | `git branch -a` |
-| `create_tag` | "标记这个版本" | `git tag` |
-| `push` | "推送到远程" | `git push` |
-| `pull` | "拉取最新修改" | `git pull` |
-| `detect_conflict` | "检测冲突" | 扫描冲突标记 |
-| `update_user_info` | "我的名字是小明" | 更新用户配置 |
-| `help` | "帮助"、"你能做什么" | 帮助文档 |
-
-**解析策略**：多策略关键词匹配 + 匹配分数排序，选出最高置信度的意图。
-
-### Planner — 执行规划器（本地模式）
-
-将意图转化为多步骤执行计划（`Plan`），每个步骤（`Step`）对应一个原子操作：
-
-```
-意图: save_version
-  ↓
-计划:
-  Step 1: git_add (添加文件到暂存区) [必要]
-  Step 2: git_commit (创建提交) [必要]
-  Step 3: conflict_detect (冲突检测) [可选]
-```
-
-### GitWrapper — Git 操作封装
-
-基于 [go-git](https://github.com/go-git/go-git) 的完整封装层，提供**面向办公场景的高层接口**：
-
-| 方法 | 办公场景描述 | 底层 git 命令 |
-|------|-------------|--------------|
-| `SaveVersion()` | 保存新版本 | `add` + `commit` |
-| `GetHistory()` | 查看修改历史 | `log` |
-| `RestoreVersion()` | 恢复旧版本 | `checkout` |
-| `RestoreFile()` | 恢复指定文件到旧版本 | `checkout` |
-| `GetDiff()` | 查看改动内容 | `diff` |
-| `CommitDiff()` | 查看某次提交的修改内容 | `diff`（提交 vs 父提交） |
-| `GetStatus()` | 查看当前状态 | `status` |
-| `GetAheadBehind()` | 查看与远程的同步状态 | `rev-list --left-right --count` |
-| `SubmitChange()` | 提交给团队 | `push` |
-| `PushWithAuth()` | 使用 HTTPS 认证推送（用户名+令牌） | `push` with auth |
-| `SetRemoteURL()` | 切换远程仓库地址（如 SSH → HTTPS） | `remote set-url` |
-| `GetTeamChange()` | 查看他人修改 | `log --author` |
-| `CreateBranch()` | 新建工作分支 | `branch` |
-| `SwitchBranch()` | 切换工作分支 | `checkout` |
-| `MergeBranch()` | 合并修改 | `merge` |
-| `CreateTag()` | 标记版本 | `tag` |
-
-所有 git 概念都通过**数据结构**和**方法命名**翻译为用户友好的办公语言：
-
-- `commit` → `VersionInfo`（版本信息）
-- `diff` → `FileChange`（文件改动）
-- `status` → `StatusInfo`（状态信息）
-- `branch` → `BranchInfo`（分支信息）
-
-### ConflictDetector — 冲突检测与解决
-
-- **Scan()** — 扫描工作目录中的冲突标记（`<<<<<<<`、`=======`、`>>>>>>>`）
-- **Resolve()** — 按策略解决冲突（`ours` / `theirs` / `merge`）
-- **AutoResolveSimpleConflicts()** — 自动解决简单冲突
-- **SuggestResolution()** — 为复杂冲突提供解决建议和置信度
-
-## 交互示例
-
-### 场景 1：LLM 模式 - 保存报告新版本
-```
-🧠 > 帮我保存一下修改，更新了市场分析报告
-
-  ✅ 已保存为新版本！
-  💡 提交给团队 | 查看修改历史
-Token 用量：256（输入: 180, 输出: 76）
-```
-
-### 场景 2：LLM 模式 - 查看修改历史
-```
-🧠 > 查看历史
-
-  | ID | 提交 Hash | 提交人 | 时间 | 修改内容 |
-  |-----|----------|--------|------|----------|
-  | 1 | 5c1a42e1 | jackz | 2026-04-22 | feat: support viewing specific commit diff |
-  | 2 | 32c99ffb | jackz | 2026-04-22 | docs: update help documentation and comments |
-  | 3 | 684ac5d | jackz | 2026-04-22 | refactor: unify tool parameter passing |
-
-Token 用量：312（输入: 220, 输出: 92）
-```
-
-### 场景 3：LLM 模式 - 查看特定提交的修改
-```
-🧠 > 提交 5c1a42e1 改了什么？
-
-  📋 提交 5c1a42e1 的修改内容：
-  文件: agent.go | +45 -12
-  文件: tools.go | +18 -3
-
-Token 用量：289（输入: 195, 输出: 94）
-```
-
-### 场景 4：LLM 模式 - 查看状态（含同步信息）
-```
-🧠 > 查看状态
-
-  📋 工作区无修改
-  | ID | 提交 Hash | 提交人 | 时间 | 修改内容 |
-  |-----|----------|--------|------|----------|
-  | 1 | 5c1a42e1 | jackz | 2026-04-22 | feat: support viewing specific commit diff |
-
-  📡 本地领先远程 2 个提交，建议推送同步。
-
-Token 用量：198（输入: 140, 输出: 58）
-```
-
-### 场景 5：LLM 模式 - 设置用户信息
-```
-🧠 > 我的名字是小明，邮箱是 xiaoming@company.com
-
-  ✅ 用户信息已更新：小明 <xiaoming@company.com>
-
-Token 用量：145（输入: 120, 输出: 25）
-```
-
-### 场景 6：本地模式 - 处理冲突
-```
-📝 > 拉取最新修改
-
-⚠️ 发现 1 处冲突需要处理：
-  📄 report.md：您和同事都修改了同一位置
-  💡 建议：冲突区域简单，建议自动合并
-
-📝 > 解决冲突，用 merge 策略
-
-✅ 冲突已解决！
-  📝 report.md：已自动合并双方修改
-  💡 您可能还想：
-     • 保存合并结果
-     • 提交给团队
-```
-
 ## 快速开始
 
+### 前置条件
+
+- **Go 1.24+** — [下载](https://go.dev/dl/)
+- **Node.js 18+** — [下载](https://nodejs.org/)（仅构建前端时需要）
+
 ### 安装
+
 ```bash
 git clone <repo-url> git-agent
 cd git-agent
 go mod tidy
 ```
 
-### 交互模式（推荐）
+### 方式一：Web 模式（推荐）
+
+```bash
+# 构建前端 + 后端，然后启动 Web 服务
+make build
+./git-agent serve
+
+# 或指定端口
+./git-agent serve --port 9000
+```
+
+浏览器打开 `http://127.0.0.1:8088`，界面会引导您打开目录并管理版本。
+
+### 方式二：CLI 模式
 
 **本地模式**（无需 API Key）：
 ```bash
@@ -538,62 +305,65 @@ make dev
 # OpenAI
 go run main.go --api-key sk-xxx --model gpt-4o
 
-# DeepSeek
+# DeepSeek（国产，更便宜）
 go run main.go --api-key sk-xxx --base-url https://api.deepseek.com/v1 --model deepseek-chat
 
 # Azure OpenAI
 go run main.go --api-key YOUR_KEY --base-url https://YOUR.openai.azure.com/openai/deployments/YOUR_MODEL --model gpt-4o
-```
 
-进入交互模式后：
-
-```
-Git Agent v0.1.0(abc1234)
-  🧠 LLM gpt-4o @ api.openai.com
-
-  输入「帮助」查看所有操作  输入「退出」结束会话
-
-
-🧠 > _
+# 本地 Ollama（免费，离线可用）
+go run main.go --api-key ollama --base-url http://localhost:11434/v1 --model qwen2.5:7b
 ```
 
 ### 从源码构建
 
 ```bash
-# 构建并注入版本信息
+# 完整构建（前端 + Go，注入版本信息）
 make build
 
 # 查看版本
 ./git-agent --version
 ```
 
-输出：
-```
-  ____ ___ _____      _    ____ _____ _   _ _____ 
- / ___|_ _|_   _|    / \  / ___| ____| \ | |_   _|
-| |  _ | |  | |     / _ \| |  _|  _| |  \| | | |  
-| |_| || |  | |    / ___ \ |_| | |___| |\  | | |  
- \____|___| |_|   /_/   \_\____|_____|_| \_| |_|  
-                                                  
+## 开发
 
-当前版本: v0.1.0
-Commit: abc1234
-构建时间: 2026-04-22 10:00:00
+### 开发模式（热加载）
+
+项目支持开发期间**前后端同时热加载**：
+
+```bash
+# 安装 air 用于 Go 热加载（一次性）
+go install github.com/air-verse/air@latest
+
+# 方式 A：两个终端
+make dev-server   # 终端 1：后端（.go 文件修改自动重启）
+make dev-web      # 终端 2：前端（Vite HMR，.vue/.ts 修改实时生效）
+
+# 方式 B：一个终端
+make dev-all      # 同时启动前后端热加载
 ```
+
+访问 `http://localhost:5173` 查看开发前端（自动代理 `/api` 到后端 `:8088`）。
 
 ### Makefile 命令
 
 | 命令 | 说明 |
 |------|------|
-| `make build` | 构建二进制文件（注入版本信息） |
-| `make run` | 构建并运行 |
+| `make build` | 编译项目（前端 + Go，注入版本信息） |
+| `make build-web` | 只构建前端到 `internal/web/dist/` |
+| `make build-go-only` | 只编译 Go 二进制（跳过前端） |
+| `make serve` | 构建并启动 Web 服务 |
+| `make run` | 编译并运行 CLI 模式 |
 | `make dev` | 开发模式直接运行（不注入版本信息） |
-| `make version` | 构建并显示版本信息 |
-| `make clean` | 清理构建产物 |
+| `make dev-web` | 启动前端热加载服务（端口 5173） |
+| `make dev-server` | 启动后端开发服务（端口 8088，支持 air 热加载） |
+| `make dev-all` | 同时启动前后端热加载 |
+| `make version` | 查看版本信息 |
 | `make test` | 运行测试 |
 | `make test-cover` | 运行测试并生成覆盖率报告 |
-| `make lint` | 运行代码检查 |
+| `make lint` | 代码检查 |
 | `make tidy` | 整理依赖 |
+| `make clean` | 清理编译产物 |
 | `make install` | 安装到 GOPATH/bin |
 
 ### 命令行参数
@@ -603,15 +373,24 @@ Commit: abc1234
 | `--api-key` | LLM API Key | `GIT_AGENT_API_KEY` |
 | `--base-url` | LLM API Base URL | `GIT_AGENT_BASE_URL` |
 | `--model` | LLM 模型名称 | `GIT_AGENT_MODEL` |
-| `--repo` | 仓库路径（默认 `.`） | - |
-| `--version` | 显示版本信息 | - |
-| `--help` | 显示帮助信息 | - |
+| `--repo` | 仓库路径（默认 `.`） | — |
+| `--version` | 显示版本信息 | — |
+| `--help` | 显示帮助信息 | — |
+
+### Serve 子命令参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--port` | Web 服务端口 | `8088` |
+| `--host` | 监听地址 | `127.0.0.1` |
+| `--open` | 自动打开浏览器 | `true` |
+| `--i-know-what-i-do` | 允许局域网访问 | `false` |
 
 ### 环境变量
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `GIT_AGENT_API_KEY` | LLM API Key | - |
+| `GIT_AGENT_API_KEY` | LLM API Key | — |
 | `GIT_AGENT_BASE_URL` | LLM API 地址 | `https://api.openai.com/v1` |
 | `GIT_AGENT_MODEL` | LLM 模型名称 | `gpt-4o` |
 | `GIT_AGENT_MAX_TOKENS` | 最大 token 数 | `4096` |
@@ -620,27 +399,11 @@ Commit: abc1234
 | `GIT_HTTP_USERNAME` | HTTPS Git 用户名（推送认证用） | — |
 | `GIT_HTTP_PASSWORD` | HTTPS Git 密码/令牌（推送认证用） | — |
 
-### 交互模式命令
-
-| 命令 | 说明 |
-|------|------|
-| `/mode local` | 切换到本地模式 |
-| `/mode llm` | 切换到 LLM 模式 |
-| `/clear` | 清空对话历史 |
-| `exit` / `quit` | 退出 |
-
-## 运行测试
-
-```bash
-make test
-# 或：go test ./...
-```
-
 ## 开发路线
 
 ### Phase 1 — 基础 MVP ✅
 - [x] 单用户版本管理功能
-- [x] 自然语言意图解析引擎
+- [x] 自然语言意图解析引擎（18 种意图）
 - [x] 执行规划器
 - [x] Git 操作封装（面向办公语言）
 - [x] 冲突检测与解决
@@ -649,35 +412,64 @@ make test
 
 ### Phase 2 — LLM 智能增强 ✅
 - [x] 集成 LangChain Go 框架（v0.1.14）
-- [x] Function Calling + ReAct 循环
+- [x] Function Calling + ReAct 循环（多轮迭代）
 - [x] 18 个 Git 工具定义与注册中心
-- [x] OpenAI / DeepSeek / Azure 等多模型支持
+- [x] OpenAI / DeepSeek / Azure / Ollama 多模型支持
 - [x] LLM 失败自动回退本地模式
 - [x] 对话上下文管理
-- [x] 提交信息使用英文 conventional commit 风格
+- [x] Commit message 质量保障（双层校验）
 - [x] HTTPS 认证支持推送操作
+- [x] SKILL/RULE 热加载提示词系统（PromptKit）
 
-### Phase 3 — 团队协作 🚧
+### Phase 3 — Web UI ✅
+- [x] 嵌入式 Web 服务器（`go embed` + SPA）
+- [x] 文件树浏览与语法高亮预览
+- [x] 状态/历史/分支面板
+- [x] AI 对话助手（流式 ReAct 可视化）
+- [x] 多工作区支持
+- [x] 设置页（用户信息、LLM 配置、HTTP 认证）
+- [x] 持久化配置（`~/.git-agent/config.json`）
+- [x] 破坏性操作审计日志
+- [x] 前端热加载（Vite HMR）+ 后端热加载（air）
+
+### Phase 4 — 团队协作 🚧
 - [ ] 多用户提交与查看
-- [ ] Web API 接口（RESTful + WebSocket）
 - [ ] 权限管理（编辑者、查看者、管理员）
 
-### Phase 4 — 高级功能 📋
+### Phase 5 — 高级功能 📋
 - [ ] 智能冲突解决建议（基于 LLM 增强）
-- [ ] 可视化差异对比 Web 界面
+- [ ] Web UI 可视化差异对比
 - [ ] 集成办公软件插件
 - [ ] 云存储适配（对接 Google Drive、OneDrive 等）
-- [ ] 审计日志
 
 ## 技术栈
 
 | 技术 | 用途 |
 |------|------|
-| **Go 1.24+** | 开发语言 |
+| **Go 1.24+** | 后端语言 |
 | [go-git/v5](https://github.com/go-git/go-git) | Git 操作底层实现 |
 | [LangChain Go v0.1.14](https://github.com/tmc/langchaingo) | LLM 框架（Function Calling、消息管理） |
+| **Vue 3 + TypeScript** | 前端框架 |
+| **Element Plus** | UI 组件库 |
+| **Vite** | 前端构建工具（开发模式 HMR） |
+| **Pinia** | 前端状态管理 |
+| [air](https://github.com/air-verse/air) | Go 后端热加载（开发模式） |
 | **Agent Loop** | 核心架构模式（感知 → 推理 → 行动 → 反馈） |
 | **ReAct** | LLM 推理模式（Reasoning + Acting 循环） |
+
+## 文档索引
+
+| 文档 | 说明 |
+|------|------|
+| [README.md](README.md) | 项目概述（英文） |
+| [README_zh.md](README_zh.md) | 项目概述（中文） |
+| [docs/USAGE.md](docs/USAGE.md) | 使用指南（英文） |
+| [docs/USAGE_zh.md](docs/USAGE_zh.md) | 使用指南（中文） |
+| [docs/TUNING_en.md](docs/TUNING_en.md) | 开发者调校指南（英文） |
+| [docs/TUNING.md](docs/TUNING.md) | 开发者调校指南（中文） |
+| [docs/web-mode_en.md](docs/web-mode_en.md) | Web 模式指南（英文） |
+| [docs/web-mode.md](docs/web-mode.md) | Web 模式指南（中文） |
+| [docs/agent-dev-walkthrough.md](docs/agent-dev-walkthrough.md) | Agent 开发详解 |
 
 ---
 

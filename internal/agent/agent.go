@@ -92,6 +92,9 @@ type Agent struct {
 	// 事件通道
 	inputChan  chan string
 	outputChan chan *AgentResponse
+
+	// 事件钩子（可选）：Web 层用来观察 Agent 执行过程，CLI 场景保持 nil。
+	events *eventHookHolder
 }
 
 // New 创建新的 Agent 实例（本地模式）
@@ -924,6 +927,7 @@ func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.T
 		}
 
 		// 执行工具
+		a.emitToolCall(toolName, toolArgs)
 		result, err := tool.Call(ctx, toolArgs)
 		if err != nil {
 			// 对 AuthError 提供友好提示，引导 LLM 给出非技术性的建议
@@ -960,6 +964,13 @@ func (a *Agent) handleLangChainToolCalls(ctx context.Context, toolCalls []llms.T
 				},
 			},
 		})
+
+		// 广播工具结果事件（Web 层用于流式展示 ReAct 过程）
+		a.emitToolResult(toolName, result)
+		// 终止性工具成功后，广播 workspace_updated，前端据此刷新文件树/状态
+		if terminalTools[toolName] && err == nil {
+			a.emit(AgentEvent{Kind: EventWorkspaceUpdated, ToolName: toolName})
+		}
 	}
 
 	// 将工具执行结果回传 LLM，让它生成最终回复
@@ -1466,8 +1477,12 @@ func (a *Agent) Close() {
 // setState 设置 Agent 状态
 func (a *Agent) setState(state AgentState) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.state = state
+	holder := a.events
+	a.mu.Unlock()
+	if holder != nil {
+		holder.emit(AgentEvent{Kind: EventStateChanged, State: state})
+	}
 }
 
 // ==================== 辅助函数 ====================

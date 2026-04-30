@@ -1,5 +1,7 @@
 # 意图解析与 LLM 调校指南
 
+[English Version](TUNING_en.md)
+
 本文档面向开发人员，介绍 git-agent 的意图解析机制、LLM 工具调用流程，以及常见问题的排查思路和调校方法。
 
 ---

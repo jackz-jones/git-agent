@@ -2,7 +2,7 @@
 
 > Empowering non-technical users to manage file versions as easily as using office software — no Git knowledge required.
 
-[中文文档](README_zh.md) | [📖 Usage Guide](USAGE.md) | [🔧 Tuning Guide](TUNING.md)
+[中文文档](README_zh.md) | [📖 Usage Guide](docs/USAGE.md) | [🔧 Tuning Guide](docs/TUNING_en.md) | [🌐 Web Mode](docs/web-mode_en.md)
 
 ## Overview
 
@@ -13,6 +13,11 @@ The project supports **dual-mode operation**:
 - 🧠 **LLM Mode**: Powered by [LangChain Go](https://github.com/tmc/langchaingo), it leverages large language models to understand user intent and executes Git operations via Function Calling + ReAct loops
 - 📝 **Local Mode (fallback)**: Keyword-matching + hardcoded planning — works out of the box with no API key required
 
+And **dual-interface access**:
+
+- 💻 **CLI Mode**: Interactive command-line interface for terminal users
+- 🌐 **Web Mode**: Modern browser-based UI with file tree, status panels, history view, branch management, and an AI chat assistant — ideal for users who prefer graphical interfaces
+
 ## Design Philosophy
 
 1. **Zero Git Knowledge Required** — Users never need to learn any Git commands
@@ -22,6 +27,7 @@ The project supports **dual-mode operation**:
 5. **Graceful Degradation** — Falls back to local mode automatically when LLM is unavailable
 6. **Smart Authentication Strategy** — New repos default to HTTPS + Token (beginner-friendly); existing repos preserve user's configured auth method; SSH auth auto-discovers `~/.ssh/config` IdentityFile
 7. **Commit Message Discipline** — All commit messages are auto-generated in English with conventional commit style (feat:/fix:/docs:/refactor:/chore:)
+8. **SKILL/RULE Hot-Reload** — Prompt engineering via Markdown files with per-intent loading and live reload
 
 ## Architecture
 
@@ -31,10 +37,18 @@ The project supports **dual-mode operation**:
 graph TB
     subgraph interaction[Interaction Layer]
         CLI[CLI Interface]
+        WebUI[Web UI<br/>Vue 3 + Element Plus]
+    end
+
+    subgraph web_server[Web Server]
+        HTTP[HTTP Server<br/>Embedded SPA + REST API]
+        SSE[SSE Stream<br/>ReAct Process Streaming]
+        WS_MGR[Workspace Manager<br/>Multi-Directory Support]
     end
 
     subgraph core[Agent Core]
         AgentCore[Agent Engine<br/>Dual-Mode Dispatch]
+        PromptKit[PromptKit<br/>SKILL/RULE Hot-Reload]
     end
 
     subgraph llm_mode[LLM Mode]
@@ -55,6 +69,11 @@ graph TB
     end
 
     CLI --> AgentCore
+    WebUI --> HTTP
+    HTTP --> WS_MGR
+    WS_MGR --> AgentCore
+    SSE --> AgentCore
+    AgentCore --> PromptKit
     AgentCore -->|LLM Available| LC
     LC --> FC
     FC --> ReAct
@@ -133,390 +152,124 @@ stateDiagram-v2
     Error --> Idle: Reset
 ```
 
-## LangChain Go Integration
+## Web UI
 
-### Integration Architecture
+The Web UI provides a modern, graphical interface for managing file versions:
 
-The project integrates [LangChain Go v0.1.14](https://github.com/tmc/langchaingo), replacing the original custom LLM Provider implementation with standardized framework components:
+- **Home Page**: Open local directories via system file picker or recent history
+- **Workspace View**: File tree (left), functional panels (right — Status / History / Branches), AI chat assistant (right drawer)
+- **Settings Page**: Configure user info, LLM API, and HTTP credentials
+- **Multi-Workspace**: Open and switch between multiple directories simultaneously
 
-```mermaid
-graph TB
-    subgraph old[Original Implementation - Replaced]
-        OldProvider[Custom Provider Interface]
-        OldMsg[Custom Message Types]
-        OldTC[Custom ToolCall Types]
-    end
+### Key Features
 
-    subgraph lc[LangChain Go Implementation]
-        LCModel[llms.Model Interface<br/>openai.LLM]
-        MC[llms.MessageContent<br/>System/Human/AI/Tool]
-        TD[llms.Tool + FunctionDefinition<br/>Function Calling]
-        TCR[llms.ToolCallResponse<br/>Tool Result Relay]
-    end
+| Feature | Description |
+|---------|-------------|
+| **File Tree** | Browse workspace files with syntax-highlighted preview |
+| **Status Panel** | View modified/new/deleted files, multi-select commit, one-click save |
+| **History Panel** | Filter commits by author/keyword, view diffs, rollback |
+| **Branch Panel** | Switch/create branches, push to remote |
+| **AI Chat** | Right-side drawer with collapsible ReAct reasoning steps, quick actions, streaming responses |
+| **Settings** | Persistent config at `~/.git-agent/config.json`, LLM test connection |
+| **Audit Log** | Destructive operations logged to `~/.git-agent/logs/ops.log` |
 
-    subgraph adapt[Tool Adaptation Layer]
-        GTR[GitToolRegistry<br/>Tool Registry]
-        GT[GitTool<br/>tools.Tool Adapter]
-        GAT[GitAgentTool<br/>Tool Definition]
-    end
+For detailed Web mode documentation, see [docs/web-mode.md](docs/web-mode.md).
 
-    LCModel -->|GenerateContent| MC
-    MC -->|Carries tool definitions| TD
-    LCModel -->|Returns ToolCalls| TCR
-    GTR -->|BuildToolDefinitions| TD
-    GTR -->|GetTool| GT
-    GAT -->|AllGitAgentTools| GTR
+## SKILL/RULE System
 
-    style OldProvider fill:#ffcccc,stroke:#cc0000
-    style OldMsg fill:#ffcccc,stroke:#cc0000
-    style OldTC fill:#ffcccc,stroke:#cc0000
+The prompt engineering system uses **Markdown files** with per-intent loading and hot-reload:
+
+```
+internal/promptkit/resources/     ← Built-in (embedded)
+├── skills/                       ← Operation knowledge (per-intent)
+│   ├── batch-commit.md
+│   ├── conflict-resolution.md
+│   └── push-fail-guide.md
+└── rules/                        ← Behavior constraints
+    ├── always-execute.md
+    ├── commit-message.md
+    ├── display-format.md
+    ├── no-git-terms.md
+    ├── no-repeat-tools.md
+    └── version-restore.md
+
+~/.config/git-agent/              ← User-level overrides
+.git-agent/                       ← Project-level overrides (team-shared)
 ```
 
-### Core Migration Mapping
+**Override priority**: Built-in < User-level < Project-level
 
-| Migration Item | Original Implementation | LangChain Go Implementation |
-|----------------|------------------------|----------------------------|
-| LLM Interface | `llm.Provider` | `llms.Model` (`openai.LLM`) |
-| Conversation Context | `[]llm.Message` | `[]llms.MessageContent` |
-| System Prompt | `SystemChatMessage{Content: ...}` | `TextParts(ChatMessageTypeSystem, ...)` |
-| User Message | `HumanChatMessage{Content: ...}` | `TextParts(ChatMessageTypeHuman, ...)` |
-| AI Message | `AIChatMessage{Content, ToolCalls}` | `MessageContent{Role: AI, Parts: [TextContent, ToolCall]}` |
-| Tool Definition | `[]llm.Tool{Function: ...}` | `[]llms.Tool{Function: *FunctionDefinition}` |
-| Tool Call | `ToolCall.Function.Name` | `ToolCall.FunctionCall.Name` (pointer type) |
-| Tool Result Relay | `ToolChatMessage{ToolCallID, Name}` | `ToolCallResponse{ToolCallID, Name, Content}` |
-| LLM Invocation | `provider.Chat(messages, tools)` | `llm.GenerateContent(ctx, messages, WithTools(...))` |
-| Response Parsing | Iterate `choice.Parts` | `choice.Content` + `choice.ToolCalls` |
-
-### Tool System Design
-
-The LLM mode invokes Git operations via **Function Calling**. The tool system has three layers:
-
-```mermaid
-graph TB
-    subgraph def[Tool Definition Layer]
-        GAT[GitAgentTool<br/>Name + Description + JSON Schema]
-    end
-
-    subgraph reg[Tool Registry Layer]
-        GTR[GitToolRegistry<br/>Register / BuildToolDefinitions / GetTool]
-    end
-
-    subgraph exec[Tool Execution Layer]
-        GT[GitTool<br/>implements tools.Tool<br/>Name / Description / Call]
-        EXEC["Tool Executor Closure<br/>func(ctx, params) -&gt; (string, error)"]
-    end
-
-    GAT -->|18 tool definitions| GTR
-    GTR -->|Register executor| EXEC
-    GTR -->|Build definitions| TD["[]llms.Tool<br/>For Function Calling"]
-    GTR -->|Lookup tool| GT
-    GT -->|Call| EXEC
-
-    subgraph tools[18 Git Tools]
-        T1[save_version]
-        T2[view_history]
-        T3[restore_version]
-        T4[view_diff]
-        T5[view_status]
-        T6[submit_change]
-        T7[view_team_change]
-        T8[merge_branch]
-        T9[init_repo]
-        T10[create_branch]
-        T11[switch_branch]
-        T12[list_branches]
-        T13[create_tag]
-        T14[push_to_remote]
-        T15[pull_from_remote]
-        T16[detect_conflict]
-        T17[resolve_conflict]
-        T18[update_user_info]
-    end
-```
-
-#### Tool Definition Example
-
-```go
-// GitAgentTool struct
-type GitAgentTool struct {
-    Name        string `json:"name"`
-    Description string `json:"description"`
-    Parameters  any    `json:"parameters"` // JSON Schema
-}
-
-// Example: save_version tool
-GitAgentTool{
-    Name:        "save_version",
-    Description: "Save current file changes as a new version. Use after editing is complete.",
-    Parameters: map[string]any{
-        "type": "object",
-        "properties": map[string]any{
-            "message": map[string]any{
-                "type":        "string",
-                "description": "Commit message in English. Summarize the main purpose of ALL file changes. Use conventional commit style, e.g.: 'feat: add Ollama LLM support', 'fix: resolve merge conflict detection'",
-            },
-            "files": map[string]any{
-                "type":        "string",
-                "description": "File paths to save, comma-separated. Leave empty to save all changes",
-            },
-        },
-        "required": []string{"message"},
-    },
-}
-```
-
-#### Tool Call Flow
-
-```mermaid
-sequenceDiagram
-    participant LLM as LLM
-    participant Agent as Agent Engine
-    participant Registry as GitToolRegistry
-    participant Tool as GitTool
-    participant Git as GitWrapper
-
-    LLM->>Agent: ToolCall{ID, FunctionCall{Name, Arguments}}
-    Agent->>Registry: GetTool(name)
-    Registry-->>Agent: GitTool instance
-    Agent->>Tool: Call(ctx, argumentsJSON)
-    Tool->>Tool: Parse JSON → params map
-    Tool->>Git: Execute specific Git operation
-    Git-->>Tool: Operation result
-    Tool-->>Agent: Result string
-    Agent->>Agent: Build ToolCallResponse and add to chatHistory
-    Agent->>LLM: GenerateContent(chatHistory, tools)
-```
-
-#### Commit Message Quality Assurance
-
-Since LLM may generate vague commit messages (e.g., `feat: update source code files`, `docs: update documentation files`), the project implements a **dual-layer quality assurance** mechanism:
-
-```mermaid
-flowchart TD
-    A[User: save my changes] --> B[LLM calls view_diff]
-    B --> C[LLM calls save_version<br/>message='feat: update source code files']
-    C --> D{isVagueCommitMessage?}
-    D -->|Too vague| E[Return error prompt<br/>Ask LLM to write a specific message]
-    E --> F[LLM regenerates<br/>message='feat: format commit time to seconds in history table']
-    F --> G{isVagueCommitMessage?}
-    G -->|Passed| H[Execute git commit successfully]
-    
-    style D fill:#f9f,stroke:#333
-    style E fill:#f66,stroke:#333
-    style H fill:#6f6,stroke:#333
-```
-
-**Layer 1 — Prompt Constraints** (in `prompts.go` and `tools.go`):
-
-- Tool parameter descriptions include `CRITICAL RULES` with explicit BAD/GOOD examples
-- System prompt commit message rules require: "MUST mention WHAT was changed (function name, feature, config item)"
-- 5+ negative examples covering common vague patterns (e.g., `update files`, `save changes`, `update source code files`)
-
-**Layer 2 — Code-Level Validation** (`isVagueCommitMessage()` in `agent.go`):
-
-Called before `save_version` and `submit_change` execution. If validation fails, returns an error to the LLM, triggering automatic message regeneration:
-
-| Check Rule | Description |
-|-----------|-------------|
-| Pattern matching | Matches 18 vague patterns (e.g., `update files`, `save changes`, `modify code`) |
-| Length threshold | Summary shorter than 10 characters is rejected |
-| Empty check | Empty message is rejected |
-
-**Fallback value correction**: Default fallback messages changed from `chore: save changes` to `chore: save pending changes (auto-generated, please specify)`, clearly indicating the need for manual specification.
+For details on tuning and customization, see [docs/TUNING.md](docs/TUNING.md).
 
 ## Project Structure
 
 ```
 git-agent/
-├── main.go                          # Entry point (interactive mode, LLM config)
+├── main.go                          # Entry point (CLI interactive mode, subcommand dispatch)
+├── serve.go                         # Web serve subcommand (config merge, signal handling)
+├── .air.toml                        # Air hot-reload config (dev mode only)
+├── Makefile                         # Build automation (frontend + backend, dev mode, version injection)
 ├── internal/
 │   ├── version.go                   # Version info with ASCII logo (injected via ldflags)
-│   ├── agent/agent.go               # Agent core engine (dual-mode dispatch, ReAct loop, state management)
+│   ├── agent/
+│   │   ├── agent.go                 # Agent core engine (dual-mode dispatch, ReAct loop, state management)
+│   │   └── events.go               # SSE event types for Web streaming
 │   ├── llm/
-│   │   ├── langchain.go             # LangChain LLM factory (openai.New adapter)
-│   │   ├── git_tools.go             # Tool registry + GitTool adapter
-│   │   ├── tools.go                 # 18 GitAgentTool definitions
-│   │   ├── prompts.go               # System prompts (intent parsing, planning, conflict analysis)
-│   │   └── provider.go              # Compatibility layer (Usage, OpenAIConfig type definitions)
-│   ├── interpreter/interpreter.go   # Natural language intent parser (18 intents, param extraction, result translation)
-│   ├── planner/planner.go           # Execution planner (intent → multi-step plan)
-│   ├── gitwrapper/gitwrapper.go     # Git operation wrapper (high-level office-friendly API)
-│   ├── conflict/conflict.go         # Conflict detection & resolution (scan, suggest, auto/manual resolve)
-│   ├── repository/repository.go     # Repository management (create, clone, list)
-│   └── storage/storage.go           # Storage layer
-├── Makefile                         # Build automation with version injection
+│   │   ├── langchain.go            # LangChain LLM factory (openai.New adapter)
+│   │   ├── git_tools.go            # Tool registry + GitTool adapter
+│   │   ├── tools.go                # 18 GitAgentTool definitions (JSON Schema params)
+│   │   └── provider.go             # Compatibility layer (Usage, OpenAIConfig types)
+│   ├── promptkit/
+│   │   ├── promptkit.go            # SKILL/RULE loader (embed + filesystem, hot-reload via fsnotify)
+│   │   ├── embed.go                # Embedded resources FS
+│   │   └── resources/              # Built-in Skills & Rules (Markdown)
+│   ├── interpreter/interpreter.go  # Natural language intent parser (18 intents, scoring, negation)
+│   ├── planner/planner.go          # Execution planner (intent → multi-step plan)
+│   ├── gitwrapper/gitwrapper.go    # Git operation wrapper (office-friendly high-level API)
+│   ├── conflict/conflict.go        # Conflict detection & resolution
+│   ├── repository/repository.go    # Repository management (create, clone, list)
+│   └── web/
+│       ├── server.go               # HTTP server lifecycle (listen, graceful shutdown)
+│       ├── routes.go               # API route registration
+│       ├── workspace.go            # Workspace manager (multi-directory, Agent lifecycle)
+│       ├── handlers_agent_stream.go # SSE streaming for ReAct process
+│       ├── handlers_readonly.go    # Read-only API (status, history, diff, branches, file content)
+│       ├── handlers_write.go       # Write API (commit, push, pull, branch, tag, init)
+│       ├── handlers_settings.go    # Settings API (config CRUD, LLM test)
+│       ├── handlers_browse.go      # File system browsing API
+│       ├── config.go               # Persistent config store (~/.git-agent/config.json)
+│       ├── recent.go               # Recent directories store
+│       ├── audit.go                # Audit logger for destructive operations
+│       ├── embed.go                # Frontend dist embedding
+│       ├── pathcheck.go            # Path traversal protection
+│       └── safepath.go             # System directory blocklist
+├── web/                             # Frontend (Vue 3 + TypeScript + Element Plus)
+│   ├── src/
+│   │   ├── App.vue                 # Root component with CSS variables
+│   │   ├── main.ts                 # Vue app bootstrap
+│   │   ├── router.ts              # Vue Router (Home / Workspace / Settings)
+│   │   ├── api/                   # API client (fetch + SSE streaming)
+│   │   ├── stores/                # Pinia stores (workspaces, agentChat)
+│   │   ├── views/                 # Page views (Home, Workspace, Settings)
+│   │   └── components/workspace/  # Workspace components (FileTree, StatusPanel, etc.)
+│   ├── vite.config.ts             # Vite config (proxy /api → :8088)
+│   └── package.json               # Frontend dependencies
+├── docs/
+│   ├── USAGE.md                   # User guide (English)
+│   ├── USAGE_zh.md                # User guide (Chinese)
+│   ├── TUNING.md                  # Developer tuning guide
+│   ├── web-mode.md                # Web mode guide
+│   └── agent-dev-walkthrough.md   # Agent development walkthrough
 ├── go.mod
 └── go.sum
 ```
 
-### Key Files
-
-| File | Lines | Responsibility |
-|------|-------|----------------|
-| `main.go` | ~362 | Interactive CLI, LLM config, environment variables, mode switching |
-| `agent/agent.go` | ~1341 | Agent core: dual-mode dispatch, LangChain integration, ReAct loop, tool registry, state management |
-| `llm/langchain.go` | ~31 | LangChain LLM factory, supports OpenAI/DeepSeek/Azure etc. |
-| `llm/git_tools.go` | ~118 | GitToolRegistry, GitTool adapter |
-| `llm/tools.go` | ~302 | 18 GitAgentTool definitions (with JSON Schema params) |
-| `llm/prompts.go` | ~199 | System prompt, intent parsing prompt, planning prompt, conflict analysis prompt |
-| `llm/provider.go` | ~348 | Compatibility layer: Usage, OpenAIConfig type definitions |
-| `internal/version.go` | ~39 | Version info with ASCII art logo, ldflags-injected variables |
-
-## Module Details
-
-### Interpreter — Intent Parser (Local Mode)
-
-Parses natural language input into structured `UserIntent`, supporting **18 intents**:
-
-| Intent | Natural Language Example | Git Operation |
-|--------|--------------------------|---------------|
-| `save_version` | "save my changes", "create a version" | `git add` + `git commit` |
-| `view_history` | "show history", "view change log" | `git log` |
-| `restore_version` | "restore yesterday's version", "go back" | `git checkout` |
-| `view_diff` | "what changed?", "show differences" | `git diff` |
-| `view_status` | "check status", "what's modified" | `git status` |
-| `submit_change` | "submit to team", "push changes" | `git push` |
-| `view_team_change` | "what did Alice change" | `git log --author` |
-| `approve_merge` | "merge Bob's changes" | `git merge` |
-| `init_repo` | "initialize repository" | `git init` |
-| `create_branch` | "create a new branch" | `git branch` |
-| `switch_branch` | "switch to report branch" | `git checkout` |
-| `list_branches` | "list workspaces" | `git branch -a` |
-| `create_tag` | "tag this version" | `git tag` |
-| `push` | "push to remote" | `git push` |
-| `pull` | "pull latest changes" | `git pull` |
-| `resolve_conflict` | "resolve conflict" | Manual/auto merge |
-| `update_user_info` | "my name is Alex" | Update user config |
-| `help` | "help", "what can you do" | Help documentation |
-
-**Parsing Strategy**: Multi-strategy keyword matching + match score ranking, selecting the highest-confidence intent.
-
-### Planner — Execution Planner (Local Mode)
-
-Converts intents into multi-step execution plans (`Plan`), where each step (`Step`) corresponds to an atomic operation:
-
-```
-Intent: save_version
-  ↓
-Plan:
-  Step 1: git_add (Stage files) [required]
-  Step 2: git_commit (Create commit) [required]
-  Step 3: conflict_detect (Conflict detection) [optional]
-```
-
-### GitWrapper — Git Operation Wrapper
-
-A comprehensive wrapper built on [go-git](https://github.com/go-git/go-git), providing **office-friendly high-level interfaces**:
-
-| Method | Office Scenario Description | Underlying Git Command |
-|--------|----------------------------|------------------------|
-| `SaveVersion()` | Save a new version | `add` + `commit` |
-| `GetHistory()` | View change history | `log` |
-| `RestoreVersion()` | Restore a previous version | `checkout` |
-| `RestoreFile()` | Restore a specific file to a previous version | `checkout` |
-| `GetDiff()` | View changes | `diff` |
-| `CommitDiff()` | View changes in a specific commit | `diff` (commit vs parent) |
-| `GetStatus()` | Check current status | `status` |
-| `GetAheadBehind()` | Check sync status with remote | `rev-list --left-right --count` |
-| `SubmitChange()` | Submit to team | `push` |
-| `PushWithAuth()` | Push with HTTPS authentication (username + token) | `push` with auth |
-| `SetRemoteURL()` | Switch remote URL (e.g., SSH → HTTPS) | `remote set-url` |
-| `GetTeamChange()` | View others' changes | `log --author` |
-| `CreateBranch()` | Create a new work branch | `branch` |
-| `SwitchBranch()` | Switch work branch | `checkout` |
-| `MergeBranch()` | Merge changes | `merge` |
-| `CreateTag()` | Tag a version | `tag` |
-
-All Git concepts are translated into user-friendly office language through **data structures** and **method naming**:
-
-- `commit` → `VersionInfo` (version info)
-- `diff` → `FileChange` (file change)
-- `status` → `StatusInfo` (status info)
-- `branch` → `BranchInfo` (branch info)
-
-### ConflictDetector — Conflict Detection & Resolution
-
-- **Scan()** — Scan working directory for conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)
-- **Resolve()** — Resolve conflicts by strategy (`ours` / `theirs` / `merge`)
-- **AutoResolveSimpleConflicts()** — Automatically resolve simple conflicts
-- **SuggestResolution()** — Provide resolution suggestions and confidence scores for complex conflicts
-
-## Interaction Examples
-
-### Example 1: LLM Mode — Save a New Report Version
-```
-🧠 > Save my changes, updated the market analysis report
-
-  ✅ Saved as new version!
-  💡 Submit to team | View change history
-Token 用量：256（输入: 180, 输出: 76）
-```
-
-### Example 2: LLM Mode — View Change History
-```
-🧠 > View change history
-
-  | ID | 提交 Hash | 提交人 | 时间 | 修改内容 |
-  |-----|----------|--------|------|----------|
-  | 1 | 5c1a42e1 | jackz | 2026-04-22 | feat: support viewing specific commit diff |
-  | 2 | 32c99ffb | jackz | 2026-04-22 | docs: update help documentation and comments |
-  | 3 | 684ac5d | jackz | 2026-04-22 | refactor: unify tool parameter passing |
-
-Token 用量：312（输入: 220, 输出: 92）
-```
-
-### Example 3: LLM Mode — View Specific Commit Changes
-```
-🧠 > What changed in commit 5c1a42e1?
-
-  📋 Changes in commit 5c1a42e1:
-  File: agent.go | +45 -12
-  File: tools.go | +18 -3
-
-Token 用量：289（输入: 195, 输出: 94）
-```
-
-### Example 4: LLM Mode — Check Status with Sync Info
-```
-🧠 > Check status
-
-  📋 Working tree clean
-  | ID | 提交 Hash | 提交人 | 时间 | 修改内容 |
-  |-----|----------|--------|------|----------|
-  | 1 | 5c1a42e1 | jackz | 2026-04-22 | feat: support viewing specific commit diff |
-
-  📡 Local is ahead of remote by 2 commits. Use "push" to sync.
-
-Token 用量：198（输入: 140, 输出: 58）
-```
-
-### Example 5: LLM Mode — Set User Info
-```
-🧠 > My name is Alex and my email is alex@company.com
-
-  ✅ User info updated: Alex <alex@company.com>
-
-Token 用量：145（输入: 120, 输出: 25）
-```
-
-### Example 6: Local Mode — Handle Conflicts
-```
-📝 > Pull latest changes
-
-⚠️ 1 conflict detected:
-  📄 report.md: You and a colleague both modified the same section
-  💡 Suggestion: The conflict area is simple, auto-merge recommended
-
-📝 > Resolve the conflict using merge strategy
-
-✅ Conflict resolved!
-  📝 report.md: Both sets of changes have been auto-merged
-  💡 You might also want to:
-     • Save the merged result
-     • Submit to team
-```
-
 ## Quick Start
+
+### Prerequisites
+
+- **Go 1.24+** — [Download](https://go.dev/dl/)
+- **Node.js 18+** — [Download](https://nodejs.org/) (only needed for frontend build)
 
 ### Install
 
@@ -526,7 +279,20 @@ cd git-agent
 go mod tidy
 ```
 
-### Interactive Mode (Recommended)
+### Option 1: Web Mode (Recommended)
+
+```bash
+# Build frontend + backend, then start Web server
+make build
+./git-agent serve
+
+# Or with custom port
+./git-agent serve --port 9000
+```
+
+Open `http://127.0.0.1:8088` in your browser. The UI will guide you through opening a directory and managing versions.
+
+### Option 2: CLI Mode
 
 **Local Mode** (no API key required):
 ```bash
@@ -544,57 +310,60 @@ go run main.go --api-key sk-xxx --base-url https://api.deepseek.com/v1 --model d
 
 # Azure OpenAI
 go run main.go --api-key YOUR_KEY --base-url https://YOUR.openai.azure.com/openai/deployments/YOUR_MODEL --model gpt-4o
-```
 
-After entering interactive mode:
-
-```
-Git Agent v0.1.0(abc1234)
-  🧠 LLM gpt-4o @ api.openai.com
-
-  输入「帮助」查看所有操作  输入「退出」结束会话
-
-
-🧠 > _
+# Local Ollama (free, offline)
+go run main.go --api-key ollama --base-url http://localhost:11434/v1 --model qwen2.5:7b
 ```
 
 ### Build from Source
 
 ```bash
-# Build with version info injected
+# Full build (frontend + Go, version injected)
 make build
 
 # Check version
 ./git-agent --version
 ```
 
-Output:
-```
-  ____ ___ _____      _    ____ _____ _   _ _____ 
- / ___|_ _|_   _|    / \  / ___| ____| \ | |_   _|
-| |  _ | |  | |     / _ \| |  _|  _| |  \| | | |  
-| |_| || |  | |    / ___ \ |_| | |___| |\  | | |  
- \____|___| |_|   /_/   \_\____|_____|_| \_| |_|  
-                                                  
+## Development
 
-Current version: v0.1.0
-Commit hash: abc1234
-Build time: 2026-04-22 10:00:00
+### Dev Mode (Hot Reload)
+
+The project supports **hot reload for both frontend and backend** during development:
+
+```bash
+# Install air for Go hot-reload (one-time)
+go install github.com/air-verse/air@latest
+
+# Option A: Two terminals
+make dev-server   # Terminal 1: Backend (auto-restart on .go changes)
+make dev-web      # Terminal 2: Frontend (Vite HMR on .vue/.ts changes)
+
+# Option B: One terminal
+make dev-all      # Starts both frontend and backend with hot-reload
 ```
+
+Access `http://localhost:5173` for the dev frontend (proxies `/api` to backend `:8088`).
 
 ### Makefile Commands
 
 | Command | Description |
 |---------|-------------|
-| `make build` | Build binary with version info injected |
-| `make run` | Build and run |
-| `make dev` | Run directly in dev mode (no version injection) |
+| `make build` | Build binary (frontend + Go, version injected) |
+| `make build-web` | Build frontend only to `internal/web/dist/` |
+| `make build-go-only` | Build Go binary only (skip frontend) |
+| `make serve` | Build and start Web server |
+| `make run` | Build and run CLI mode |
+| `make dev` | Run CLI in dev mode (no version injection) |
+| `make dev-web` | Start frontend dev server (port 5173, HMR) |
+| `make dev-server` | Start backend dev server (port 8088, air hot-reload) |
+| `make dev-all` | Start both frontend and backend with hot-reload |
 | `make version` | Build and display version info |
-| `make clean` | Remove build artifacts |
 | `make test` | Run tests |
 | `make test-cover` | Run tests with coverage report |
 | `make lint` | Run linter |
 | `make tidy` | Tidy dependencies |
+| `make clean` | Remove build artifacts |
 | `make install` | Install binary to GOPATH/bin |
 
 ### Command-Line Flags
@@ -607,6 +376,15 @@ Build time: 2026-04-22 10:00:00
 | `--repo` | Repository path (default `.`) | — |
 | `--version` | Display version info | — |
 | `--help` | Display help | — |
+
+### Serve Subcommand Flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--port` | Web server port | `8088` |
+| `--host` | Listen address | `127.0.0.1` |
+| `--open` | Auto-open browser | `true` |
+| `--i-know-what-i-do` | Allow LAN access | `false` |
 
 ### Environment Variables
 
@@ -621,27 +399,11 @@ Build time: 2026-04-22 10:00:00
 | `GIT_HTTP_USERNAME` | HTTPS Git username (for push auth) | — |
 | `GIT_HTTP_PASSWORD` | HTTPS Git password/token (for push auth) | — |
 
-### Interactive Mode Commands
-
-| Command | Description |
-|---------|-------------|
-| `/mode local` | Switch to local mode |
-| `/mode llm` | Switch to LLM mode |
-| `/clear` | Clear conversation history |
-| `exit` / `quit` | Exit |
-
-## Running Tests
-
-```bash
-make test
-# or: go test ./...
-```
-
 ## Roadmap
 
 ### Phase 1 — MVP ✅
 - [x] Single-user version management
-- [x] Natural language intent parser
+- [x] Natural language intent parser (18 intents)
 - [x] Execution planner
 - [x] Git operation wrapper (office-friendly API)
 - [x] Conflict detection & resolution
@@ -650,35 +412,64 @@ make test
 
 ### Phase 2 — LLM Enhancement ✅
 - [x] LangChain Go integration (v0.1.14)
-- [x] Function Calling + ReAct loop
+- [x] Function Calling + ReAct loop (multi-iteration)
 - [x] 18 Git tool definitions & registry
-- [x] OpenAI / DeepSeek / Azure multi-model support
+- [x] OpenAI / DeepSeek / Azure / Ollama multi-model support
 - [x] Automatic fallback to local mode on LLM failure
 - [x] Conversation context management
-- [x] Commit messages in English with conventional commit style
+- [x] Commit message quality assurance (dual-layer validation)
 - [x] HTTPS authentication support for push operations
+- [x] SKILL/RULE hot-reload prompt system (PromptKit)
 
-### Phase 3 — Team Collaboration 🚧
+### Phase 3 — Web UI ✅
+- [x] Embedded Web server (`go embed` + SPA)
+- [x] File tree browser with syntax-highlighted preview
+- [x] Status / History / Branch panels
+- [x] AI chat assistant with streaming ReAct visualization
+- [x] Multi-workspace support
+- [x] Settings page (user info, LLM config, HTTP auth)
+- [x] Persistent config (`~/.git-agent/config.json`)
+- [x] Audit logging for destructive operations
+- [x] Frontend hot-reload (Vite HMR) + Backend hot-reload (air)
+
+### Phase 4 — Team Collaboration 🚧
 - [ ] Multi-user submission & review
-- [ ] Web API (RESTful + WebSocket)
 - [ ] Role-based access control (Editor, Viewer, Admin)
 
-### Phase 4 — Advanced Features 📋
+### Phase 5 — Advanced Features 📋
 - [ ] LLM-powered intelligent conflict resolution suggestions
-- [ ] Visual diff comparison web UI
+- [ ] Visual diff comparison in Web UI
 - [ ] Office software plugin integration
 - [ ] Cloud storage adapters (Google Drive, OneDrive, etc.)
-- [ ] Audit logging
 
 ## Tech Stack
 
 | Technology | Usage |
 |------------|-------|
-| **Go 1.24+** | Programming language |
+| **Go 1.24+** | Backend language |
 | [go-git/v5](https://github.com/go-git/go-git) | Git operations (low-level) |
 | [LangChain Go v0.1.14](https://github.com/tmc/langchaingo) | LLM framework (Function Calling, message management) |
+| **Vue 3 + TypeScript** | Frontend framework |
+| **Element Plus** | UI component library |
+| **Vite** | Frontend build tool (HMR in dev) |
+| **Pinia** | Frontend state management |
+| [air](https://github.com/air-verse/air) | Go backend hot-reload (dev mode) |
 | **Agent Loop** | Core architecture pattern (Sense → Reason → Act → Feedback) |
 | **ReAct** | LLM reasoning pattern (Reasoning + Acting loop) |
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [README.md](README.md) | Project overview (English) |
+| [README_zh.md](README_zh.md) | Project overview (Chinese) |
+| [docs/USAGE.md](docs/USAGE.md) | User guide (English) |
+| [docs/USAGE_zh.md](docs/USAGE_zh.md) | User guide (Chinese) |
+| [docs/TUNING_en.md](docs/TUNING_en.md) | Developer tuning guide (English) |
+| [docs/TUNING.md](docs/TUNING.md) | Developer tuning guide (Chinese) |
+| [docs/web-mode_en.md](docs/web-mode_en.md) | Web mode guide (English) |
+| [docs/web-mode.md](docs/web-mode.md) | Web mode guide (Chinese) |
+| [docs/agent-dev-walkthrough.md](docs/agent-dev-walkthrough.md) | Agent development walkthrough |
 
 ---
 

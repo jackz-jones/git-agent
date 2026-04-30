@@ -2,7 +2,7 @@
 
 > 🎯 This guide is for **absolute beginners** with no technical background. We'll walk you through using Git Agent to manage file versions step by step.
 
-[中文文档](USAGE_zh.md) | [🔧 Tuning Guide](TUNING.md)
+[中文文档](USAGE_zh.md) | [🔧 Tuning Guide](TUNING_en.md) | [🌐 Web Mode](web-mode_en.md) | [🏠 README](../README.md)
 
 ---
 
@@ -10,8 +10,9 @@
 
 1. [What is Git Agent?](#1-what-is-git-agent)
 2. [Installation & Startup](#2-installation--startup)
-3. [Which Mode Should I Use?](#3-which-mode-should-i-use)
-4. [First Time: 5-Minute Quick Start](#4-first-time-5-minute-quick-start)
+3. [Web Mode (Recommended for Beginners)](#3-web-mode-recommended-for-beginners)
+4. [Which Mode Should I Use?](#3-which-mode-should-i-use)
+5. [First Time: 5-Minute Quick Start](#4-first-time-5-minute-quick-start)
 5. [Common Operations](#5-common-operations)
    - [Save File Changes](#51-save-file-changes)
    - [View Change History](#52-view-change-history)
@@ -165,6 +166,31 @@ Git Agent v0.1.0(abc1234)
 ```
 
 > 📝 In local mode, the header will show `📝 Local Mode (configure LLM for smarter experience: git-agent --help)`. Usage is exactly the same, but comprehension is more limited.
+
+---
+
+## 3. Web Mode (Recommended for Beginners)
+
+If you prefer a graphical interface over the command line, Git Agent provides a **Web UI**:
+
+```bash
+# Build and start Web server
+make build
+./git-agent serve
+```
+
+Your browser will automatically open `http://127.0.0.1:8088`. From there you can:
+
+1. **Open a directory** — Click the folder button to browse your file system and select a working directory
+2. **View file status** — See which files are modified, new, or deleted in the Status panel
+3. **Save versions** — Select files and commit with one click
+4. **View history** — Browse commit history with author/keyword filtering
+5. **Chat with Agent** — Click the 🤖 button in the bottom-right corner to open the AI assistant
+6. **Configure LLM** — Go to Settings to enter your API Key for smarter interactions
+
+> 💡 The Web UI supports all the same operations as the CLI, but with a visual interface. You can configure LLM settings in the Settings page without needing environment variables.
+
+For detailed Web mode documentation, see [Web Mode Guide](web-mode_en.md).
 
 ---
 
