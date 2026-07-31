@@ -109,11 +109,13 @@ func (a *Agent) emit(ev AgentEvent) {
 }
 
 // emitToolCall 工具调用开始前触发。
+// 需求 13.2：args 是 LLM 生成的 JSON 字符串，可能包含 password/token 等凭据，
+// 在广播到 SSE 与日志前必须做字段级脱敏。
 func (a *Agent) emitToolCall(name, args string) {
 	a.emit(AgentEvent{
 		Kind:     EventToolCall,
 		ToolName: name,
-		Args:     args,
+		Args:     redactJSONArgs(args),
 	})
 }
 
@@ -123,6 +125,17 @@ func (a *Agent) emitToolResult(name, result string) {
 		Kind:     EventToolResult,
 		ToolName: name,
 		Result:   result,
+	})
+}
+
+// EmitStateChanged 广播状态变更事件。
+// 用于 Web 层在外部触发（如 ReloadLLMConfig）后，通知已建立的 SSE 客户端刷新状态。
+// message 可用于携带触发原因（如 "reload"）。
+func (a *Agent) EmitStateChanged(state AgentState, message string) {
+	a.emit(AgentEvent{
+		Kind:    EventStateChanged,
+		State:   state,
+		Message: message,
 	})
 }
 

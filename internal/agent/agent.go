@@ -95,6 +95,9 @@ type Agent struct {
 
 	// 事件钩子（可选）：Web 层用来观察 Agent 执行过程，CLI 场景保持 nil。
 	events *eventHookHolder
+
+	// closeOnce 保证 Close() 幂等；重复调用不会 panic。
+	closeOnce sync.Once
 }
 
 // New 创建新的 Agent 实例（本地模式）
@@ -396,7 +399,7 @@ func (a *Agent) registerToolExecutors() {
 
 	// init_repo
 	a.toolRegistry.Register("init_repo", func(ctx context.Context, params map[string]interface{}) (string, error) {
-		err := a.gitWrapper.InitRepo()
+		err := a.gitWrapper.InitRepo(a.userConfig.Name, a.userConfig.Email)
 		return toJSONResult(nil, err)
 	})
 
@@ -459,11 +462,33 @@ func (a *Agent) registerToolExecutors() {
 			}
 		}
 
-		// 如果提供了新的远程 URL（通常是 HTTPS 地址），先切换远程地址
+		// 需求 13.1：remote_url 可能来自 LLM 幻觉/用户直接输入，
+		// 只允许 http/https 协议，防止被引导切换到恶意 file:/// 或未知协议。
 		if remoteURL != "" {
+			if err := validateRemoteHTTPSURL(remoteURL); err != nil {
+				return "", err
+			}
+		}
+
+		// 需求 13.3：切换远程 URL 前先记住原值，push 失败时尝试回滚。
+		var originalURL string
+		var urlSwitched bool
+		if remoteURL != "" {
+			if prev, err := a.gitWrapper.GetRemoteURL(remote); err == nil {
+				originalURL = prev
+			}
 			if err := a.gitWrapper.SetRemoteURL(remote, remoteURL); err != nil {
 				return "", fmt.Errorf("切换远程仓库地址失败: %w", err)
 			}
+			urlSwitched = true
+		}
+
+		// 失败时回滚远程 URL 的辅助闭包
+		rollbackURL := func() {
+			if !urlSwitched || originalURL == "" || originalURL == remoteURL {
+				return
+			}
+			_ = a.gitWrapper.SetRemoteURL(remote, originalURL)
 		}
 
 		// 如果提供了认证信息，先检测远程 URL 协议
@@ -471,6 +496,7 @@ func (a *Agent) registerToolExecutors() {
 			// 检测远程 URL 是否为 SSH 协议
 			if a.gitWrapper.IsRemoteSSH(remote) {
 				currentURL, _ := a.gitWrapper.GetRemoteURL(remote)
+				rollbackURL()
 				// SSH 远程仓库不支持用户名/令牌认证
 				return "", &gitwrapper.AuthError{
 					RemoteURL: currentURL,
@@ -480,6 +506,7 @@ func (a *Agent) registerToolExecutors() {
 			}
 			err := a.gitWrapper.PushWithAuth(remote, username, password)
 			if err != nil {
+				rollbackURL()
 				return "", err
 			}
 			return toJSONResult(nil, nil)
@@ -487,6 +514,7 @@ func (a *Agent) registerToolExecutors() {
 
 		err := a.gitWrapper.Push(remote)
 		if err != nil {
+			rollbackURL()
 			return "", err
 		}
 		return toJSONResult(nil, nil)
@@ -518,27 +546,99 @@ func (a *Agent) registerToolExecutors() {
 // 防止 LLM 反复调用同一工具导致无限循环
 const maxReActIterations = 5
 
+// 需求 14：chatHistory 治理阈值。
+//
+// 长会话下 chatHistory 无限增长会带来两个问题：
+//  1. 单次 LLM 请求的 token 数不断膨胀，成本累积；
+//  2. 单条 tool_result（例如 view_diff 输出）过大时会挤占上下文。
+//
+// 因此设置两个阈值：
+//   - maxChatHistoryMessages：非 system 消息数量上限，超过后从最旧的一条非 system 消息开始丢弃；
+//   - maxChatMessageBytes：单条消息序列化后字节数上限，超过时截断尾部并补充省略标记。
+const (
+	maxChatHistoryMessages = 60
+	maxChatMessageBytes    = 16 * 1024
+)
+
+// truncatePart 若 TextContent 超长，则截断并追加省略标记；其他类型 Part 原样返回。
+func truncatePart(part llms.ContentPart, limit int) llms.ContentPart {
+	if limit <= 0 {
+		return part
+	}
+	txt, ok := part.(llms.TextContent)
+	if !ok {
+		return part
+	}
+	if len(txt.Text) <= limit {
+		return part
+	}
+	suffix := "\n... [truncated by chat history guard]"
+	keep := limit - len(suffix)
+	if keep < 0 {
+		keep = 0
+	}
+	txt.Text = txt.Text[:keep] + suffix
+	return txt
+}
+
+// enforceChatHistoryLimits 裁剪 chatHistory：
+//  1. 对每条消息中的 TextContent 做单条字节数截断；
+//  2. 保留全部 system 消息，只丢弃最旧的非 system 消息，直到总数 <= maxChatHistoryMessages。
+//
+// 调用方必须已持有 a.mu 写锁。
+func (a *Agent) enforceChatHistoryLimits() {
+	for i := range a.chatHistory {
+		for j := range a.chatHistory[i].Parts {
+			a.chatHistory[i].Parts[j] = truncatePart(a.chatHistory[i].Parts[j], maxChatMessageBytes)
+		}
+	}
+
+	nonSystem := 0
+	for _, msg := range a.chatHistory {
+		if msg.Role != llms.ChatMessageTypeSystem {
+			nonSystem++
+		}
+	}
+	if nonSystem <= maxChatHistoryMessages {
+		return
+	}
+
+	toDrop := nonSystem - maxChatHistoryMessages
+	trimmed := make([]llms.MessageContent, 0, len(a.chatHistory)-toDrop)
+	for _, msg := range a.chatHistory {
+		if toDrop > 0 && msg.Role != llms.ChatMessageTypeSystem {
+			toDrop--
+			continue
+		}
+		trimmed = append(trimmed, msg)
+	}
+	a.chatHistory = trimmed
+}
+
 // intentToolMapping 意图到工具名称的映射
-// 用于智能筛选发送给 LLM 的工具，避免小模型被过多工具干扰
-var intentToolMapping = map[string][]string{
-	"save_version":     {"save_version", "view_status", "update_user_info"},
-	"view_history":     {"view_history", "view_status"},
-	"restore_version":  {"restore_version", "view_history", "view_diff"},
-	"view_diff":        {"view_diff", "view_status"},
-	"view_status":      {"view_status", "view_diff", "view_history"},
-	"submit_change":    {"submit_change", "view_status", "push_to_remote", "update_user_info"},
-	"view_team_change": {"view_team_change", "view_history", "view_diff"},
-	"approve_merge":    {"merge_branch", "view_status", "view_diff"},
-	"init_repo":        {"init_repo"},
-	"create_branch":    {"create_branch", "switch_branch", "list_branches"},
-	"switch_branch":    {"switch_branch", "list_branches", "create_branch"},
-	"list_branches":    {"list_branches", "switch_branch"},
-	"create_tag":       {"create_tag", "view_history"},
-	"push":             {"push_to_remote", "view_status"},
-	"pull":             {"pull_from_remote", "view_status", "detect_conflict"},
-	"detect_conflict":  {"detect_conflict", "resolve_conflict", "view_status"},
-	"help":             {"view_status", "view_history"},
-	"update_user_info": {"update_user_info"},
+// 用于智能筛选发送给 LLM 的工具，避免小模型被过多工具干扰。
+// 需求 15：使用强类型键 interpreter.IntentType，新增 IntentType 常量时如果未在此处补齐映射，
+// TestIntentToolMappingCoverage 单元测试会失败，可在编译期就发现遗漏。
+var intentToolMapping = map[interpreter.IntentType][]string{
+	interpreter.IntentSaveVersion:    {"save_version", "view_status", "update_user_info"},
+	interpreter.IntentViewHistory:    {"view_history", "view_status"},
+	interpreter.IntentRestoreVersion: {"restore_version", "view_history", "view_diff"},
+	interpreter.IntentViewDiff:       {"view_diff", "view_status"},
+	interpreter.IntentViewStatus:     {"view_status", "view_diff", "view_history"},
+	interpreter.IntentSubmitChange:   {"submit_change", "view_status", "push_to_remote", "update_user_info"},
+	interpreter.IntentViewTeamChange: {"view_team_change", "view_history", "view_diff"},
+	interpreter.IntentApproveMerge:   {"merge_branch", "view_status", "view_diff"},
+	interpreter.IntentInitRepo:       {"init_repo"},
+	interpreter.IntentCreateBranch:   {"create_branch", "switch_branch", "list_branches"},
+	interpreter.IntentSwitchBranch:   {"switch_branch", "list_branches", "create_branch"},
+	interpreter.IntentListBranches:   {"list_branches", "switch_branch"},
+	interpreter.IntentCreateTag:      {"create_tag", "view_history"},
+	interpreter.IntentPush:           {"push_to_remote", "view_status"},
+	interpreter.IntentPull:           {"pull_from_remote", "view_status", "detect_conflict"},
+	interpreter.IntentDetectConflict: {"detect_conflict", "resolve_conflict", "view_status"},
+	interpreter.IntentHelp:           {"view_status", "view_history"},
+	interpreter.IntentUpdateUserInfo: {"update_user_info"},
+	// IntentUnknown 故意不映射：解析失败时走全量工具兜底。
 }
 
 // buildSystemPrompt 构建系统提示词
@@ -618,9 +718,13 @@ func (a *Agent) selectRelevantTools(input string) []llms.Tool {
 	}
 	
 	// 获取与意图相关的工具名称
-	relevantNames := intentToolMapping[string(intent.Type)]
+	relevantNames := intentToolMapping[intent.Type]
 	if len(relevantNames) == 0 {
-		// 未知意图，发送所有工具
+		// 需求 15.2：未命中映射时打 warning，方便及早发现 IntentType 新增遗漏。
+		// IntentUnknown 属于预期未映射，不输出 warning 以免噪音。
+		if intent.Type != interpreter.IntentUnknown {
+			log.Printf("[agent] warning: intent %q has no tool mapping, falling back to full tool set", intent.Type)
+		}
 		return a.toolDefs
 	}
 	
@@ -697,7 +801,30 @@ func (a *Agent) hasToolResultInHistory(toolName string) bool {
 
 // IsLLMEnabled 检查 LLM 是否已启用
 func (a *Agent) IsLLMEnabled() bool {
-	return a.langchainLLM != nil && a.llmConfig.Enabled
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.langchainLLM != nil && a.llmConfig != nil && a.llmConfig.Enabled
+}
+
+// SetLLMEnabled 切换 LLM 开关。
+// 需求 19：CLI /mode 命令要真正影响 Process 的分流，而不仅仅是打印提示。
+//
+// 参数 enabled = true 时，仅当已经初始化过 langchainLLM 且 llmConfig 非空才生效，
+// 否则返回 error；enabled = false 时无副作用地切回本地模式。
+func (a *Agent) SetLLMEnabled(enabled bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if enabled {
+		if a.langchainLLM == nil || a.llmConfig == nil {
+			return fmt.Errorf("LLM 未初始化，无法切换到 LLM 模式")
+		}
+		a.llmConfig.Enabled = true
+		return nil
+	}
+	if a.llmConfig != nil {
+		a.llmConfig.Enabled = false
+	}
+	return nil
 }
 
 // Process 处理用户自然语言输入，这是 Agent 的主入口
@@ -733,6 +860,12 @@ func (a *Agent) processWithLLM(ctx context.Context, input string) *AgentResponse
 		llms.TextParts(llms.ChatMessageTypeHuman, input),
 	)
 
+	// 需求 14：每次 Human 消息入队后统一裁剪，
+	// 控制总消息数不超过 maxChatHistoryMessages、单条不超过 maxChatMessageBytes。
+	a.mu.Lock()
+	a.enforceChatHistoryLimits()
+	a.mu.Unlock()
+
 	// 智能工具筛选：先用本地 interpreter 预判意图，只发送相关工具给 LLM
 	// 这对于小模型（如 7B）特别重要，工具太多会导致模型不调用任何工具
 	a.currentTools = a.selectRelevantTools(input)
@@ -766,6 +899,12 @@ func (a *Agent) handleLLMResponse(ctx context.Context, resp *llms.ContentRespons
 
 // handleLLMResponseWithUsage 处理 LLM 响应，支持跨多轮 ReAct 累加 token 用量
 func (a *Agent) handleLLMResponseWithUsage(ctx context.Context, resp *llms.ContentResponse, iteration int, accumUsage *llm.Usage, callHistory ...map[string]int) *AgentResponse {
+	// 需求 14：每次进入 ReAct 处理循环前统一裁剪 chatHistory，
+	// 覆盖上一轮 tool_result / assistant 消息 append 后的场景。
+	a.mu.Lock()
+	a.enforceChatHistoryLimits()
+	a.mu.Unlock()
+
 	if len(resp.Choices) == 0 {
 		a.setState(StateIdle)
 		return &AgentResponse{
@@ -819,7 +958,15 @@ func (a *Agent) handleLLMResponseWithUsage(ctx context.Context, resp *llms.Conte
 		aiParts = append(aiParts, llms.TextContent{Text: assistantContent})
 	}
 	for _, tc := range toolCalls {
-		aiParts = append(aiParts, tc)
+		// 需求 13.2：写入 chatHistory 前脱敏 args 中的敏感字段，
+		// 避免 password/token 等长期驻留于对话上下文并被后续再次广播/持久化。
+		redactedTC := tc
+		if tc.FunctionCall != nil {
+			fc := *tc.FunctionCall
+			fc.Arguments = redactJSONArgs(fc.Arguments)
+			redactedTC.FunctionCall = &fc
+		}
+		aiParts = append(aiParts, redactedTC)
 	}
 	if len(aiParts) > 0 {
 		a.chatHistory = append(a.chatHistory, llms.MessageContent{
@@ -1187,7 +1334,7 @@ func (a *Agent) executePlan(ctx context.Context, plan *planner.Plan) (*planner.E
 func (a *Agent) executeStep(step *planner.Step) (interface{}, error) {
 	switch step.Type {
 	case planner.StepGitInit:
-		return nil, a.gitWrapper.InitRepo()
+		return nil, a.gitWrapper.InitRepo(a.userConfig.Name, a.userConfig.Email)
 
 	case planner.StepGitAdd:
 		files := step.Params["files"]
@@ -1466,12 +1613,72 @@ func (a *Agent) ensureUserConfig() error {
 
 // Close 关闭 Agent，释放资源
 func (a *Agent) Close() {
-	// 关闭 Skills/Rules 热加载监听器
-	if a.promptKit != nil {
-		a.promptKit.Close()
+	// 使用 sync.Once 保证多次调用安全：channel 只关闭一次，避免二次 panic。
+	a.closeOnce.Do(func() {
+		// 关闭 Skills/Rules 热加载监听器（内部 panic 被 recover 保护）。
+		if a.promptKit != nil {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[agent] 关闭 promptKit panic: %v", r)
+					}
+				}()
+				a.promptKit.Close()
+			}()
+		}
+		close(a.inputChan)
+		close(a.outputChan)
+	})
+}
+
+// SnapshotChatHistory 返回当前 chatHistory 的浅拷贝，供热重载 Agent 时保留上下文使用。
+// 返回的切片与内部切片是不同的底层数组，调用方可以安全遍历/追加，不会污染 Agent。
+func (a *Agent) SnapshotChatHistory() []llms.MessageContent {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if len(a.chatHistory) == 0 {
+		return nil
 	}
-	close(a.inputChan)
-	close(a.outputChan)
+	out := make([]llms.MessageContent, len(a.chatHistory))
+	copy(out, a.chatHistory)
+	return out
+}
+
+// LoadChatHistory 用给定的消息切片替换当前 chatHistory。
+// 典型使用：ReloadLLMConfig 重建 Agent 后，把旧 Agent 的历史迁移过来，避免上下文丢失。
+// 若 msgs 为空则视作清空。
+func (a *Agent) LoadChatHistory(msgs []llms.MessageContent) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(msgs) == 0 {
+		a.chatHistory = a.chatHistory[:0]
+		return
+	}
+	dup := make([]llms.MessageContent, len(msgs))
+	copy(dup, msgs)
+	a.chatHistory = dup
+}
+
+// TransferEventHook 从 old Agent 摘出事件钩子并挂到当前 Agent 上。
+// 用途：ReloadLLMConfig 场景下让已建立的 SSE 连接无缝跟随新 Agent。
+// 若 old 为 nil 或未挂钩子则为 no-op。
+func (a *Agent) TransferEventHook(old *Agent) {
+	if old == nil {
+		return
+	}
+	old.mu.RLock()
+	h := old.events
+	old.mu.RUnlock()
+	if h == nil {
+		return
+	}
+	h.mu.RLock()
+	fn := h.hook
+	h.mu.RUnlock()
+	if fn == nil {
+		return
+	}
+	a.SetEventHook(fn)
 }
 
 // setState 设置 Agent 状态
@@ -1593,10 +1800,14 @@ func formatVersionTable(versions []gitwrapper.VersionInfo) string {
 	}
 
 	sb.WriteString(fmt.Sprintf("\n共 %d 条提交记录。", len(versions)))
-	sb.WriteString("\n\n[SYSTEM] 以上表格已经是格式化好的最终展示内容，你必须遵守以下规则：")
-	sb.WriteString("\n1. 必须原样展示完整表格，不得删减列、不得改写表格内容、不得只展示部分列。")
-	sb.WriteString("\n2. 「修改内容」列的内容必须完整展示，不得截断或省略（如末尾出现...省略号则说明你截断了，必须完整输出）。如果内容较长，可在单元格内用<br>换行。")
-	sb.WriteString("\n3. 当用户想查看某个提交的具体修改点时，请调用 view_diff 工具并传入 commit_hash 参数（使用表格中「提交 Hash」列的完整值或短值均可）。不要回复找不到提交记录。")
+	// 需求 16：把系统级说明包裹在 <|system-note|> 标签中，
+	// 并要求 LLM 不要把标签内文字转述给用户，避免规则文本作为幻觉泄漏到终端。
+	// 若某些模型忽略标签，也不会输出以 “[SYSTEM]” 开头的显眼段落误导用户。
+	sb.WriteString("\n\n<|system-note|>以下内容仅供你自己参考，禁止把本段任何文字复述给用户：")
+	sb.WriteString("\n1. 上方表格已格式化完毕，必须原样输出，不得删减列、不得改写内容、不得只展示部分列。")
+	sb.WriteString("\n2. 「修改内容」列必须完整输出，不得截断或省略；内容较长时可在单元格内用 <br> 换行。")
+	sb.WriteString("\n3. 用户想查看某个提交的具体修改点时，调用 view_diff 工具并传入 commit_hash（完整或短值均可）。")
+	sb.WriteString("\n<|/system-note|>")
 	return sb.String()
 }
 
@@ -1604,7 +1815,8 @@ func isConflictError(err error) bool {
 	if err == nil {
 		return false
 	}
-	return containsAny(err.Error(), "conflict", "冲突", "CONFLICT")
+	msg := err.Error()
+	return strings.Contains(msg, "conflict") || strings.Contains(msg, "冲突") || strings.Contains(msg, "CONFLICT")
 }
 
 func translateError(err error) string {
@@ -1630,44 +1842,15 @@ func translateError(err error) string {
 		"认证失败":                    "远程仓库连接认证失败",
 	}
 	for eng, zh := range translations {
-		if contains(msg, eng) {
+		if strings.Contains(msg, eng) {
 			return zh
 		}
 	}
 	return msg
 }
 
-func containsAny(s string, substrs ...string) bool {
-	for _, sub := range substrs {
-		if contains(s, sub) {
-			return true
-		}
-	}
-	return false
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsHelper(s, sub))
-}
-
-func containsHelper(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}
-
 func joinStrings(ss []string) string {
-	result := ""
-	for i, s := range ss {
-		if i > 0 {
-			result += "\n"
-		}
-		result += s
-	}
-	return result
+	return strings.Join(ss, "\n")
 }
 
 func splitFiles(s string) []string {
@@ -1675,41 +1858,13 @@ func splitFiles(s string) []string {
 		return nil
 	}
 	var files []string
-	for _, f := range splitByComma(s) {
-		f = trimSpace(f)
+	for _, f := range strings.Split(s, ",") {
+		f = strings.TrimSpace(f)
 		if f != "" {
 			files = append(files, f)
 		}
 	}
 	return files
-}
-
-func splitByComma(s string) []string {
-	var result []string
-	current := ""
-	for _, c := range s {
-		if c == ',' {
-			result = append(result, current)
-			current = ""
-		} else {
-			current += string(c)
-		}
-	}
-	if current != "" {
-		result = append(result, current)
-	}
-	return result
-}
-
-func trimSpace(s string) string {
-	start, end := 0, len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\t') {
-		start++
-	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
-		end--
-	}
-	return s[start:end]
 }
 
 // isVagueCommitMessage 检查 commit message 是否过于笼统

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackz-jones/git-agent/internal/agent"
@@ -71,8 +72,21 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	writeMu := &sync.Mutex{}
+	// stopped 标记：当客户端断开或写失败时置 1，后续所有 sendEvent 直接返回，
+	// 避免向已关闭的连接反复写入 broken pipe。
+	var stopped atomic.Bool
 
 	sendEvent := func(ev agent.AgentEvent) {
+		if stopped.Load() {
+			return
+		}
+		// 客户端断开时，ctx.Done 会被关闭；此时立刻停写。
+		select {
+		case <-ctx.Done():
+			stopped.Store(true)
+			return
+		default:
+		}
 		if ev.Timestamp.IsZero() {
 			ev.Timestamp = time.Now()
 		}
@@ -83,8 +97,20 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		writeMu.Lock()
 		defer writeMu.Unlock()
 		// 注意：每条 SSE 数据必须以 "data: ... \n\n" 结尾
-		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Kind, raw)
-		flusher.Flush()
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Kind, raw); err != nil {
+			// broken pipe / connection reset：客户端已断开，停止后续写入。
+			stopped.Store(true)
+			return
+		}
+		// Flush 也可能因连接关闭而 panic on some proxies；使用 defer recover 兜底。
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					stopped.Store(true)
+				}
+			}()
+			flusher.Flush()
+		}()
 	}
 
 	// 本地模式强制：需要时切换

@@ -89,13 +89,14 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 	const maxEntries = 500 // 单目录下最多返回 500 个节点，防御超大目录
 	nodes := make([]TreeNode, 0, len(entries))
 	hasMore := false
-	for i, e := range entries {
+	for _, e := range entries {
 		name := e.Name()
 		// 跳过 .git 目录（用户不关心）
 		if name == ".git" {
 			continue
 		}
-		if i >= maxEntries {
+		// 用已收集节点数（而非遍历下标）判断截断，避免隐藏目录多时过早截断。
+		if len(nodes) >= maxEntries {
 			hasMore = true
 			break
 		}
@@ -141,6 +142,12 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	rel := r.URL.Query().Get("path")
 	if rel == "" {
 		writeError(w, http.StatusBadRequest, "missing_path", "缺少 path 查询参数")
+		return
+	}
+	// 与 handleTree 一致：屏蔽 .git 相关文件的读取。
+	slashRel := filepath.ToSlash(filepath.Clean(rel))
+	if slashRel == ".git" || strings.HasPrefix(slashRel, ".git/") || strings.Contains(slashRel, "/.git/") {
+		writeError(w, http.StatusForbidden, "path_denied", "禁止读取 .git 目录内容")
 		return
 	}
 	abs, err := safeJoin(ws.Path, rel)

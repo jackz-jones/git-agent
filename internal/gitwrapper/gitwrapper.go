@@ -13,11 +13,22 @@ import (
 	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	fdiff "github.com/go-git/go-git/v5/plumbing/format/diff"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/go-git/go-git/v5/utils/merkletrie"
+)
+
+// 包级 sentinel error，供外部通过 errors.Is 判定，避免字符串比较
+var (
+	// ErrNoChangesToCommit 表示当前工作区没有需要提交的修改
+	ErrNoChangesToCommit = errors.New("no changes to commit")
+	// errLimitReached 内部用于在 iter.ForEach 中提前中止遍历（达到 limit）
+	errLimitReached = errors.New("limit reached")
+	// errIterStop 内部用于在 iter.ForEach 中提前中止遍历（找到目标 commit）
+	errIterStop = errors.New("stop")
 )
 
 // VersionInfo 表示一个版本（commit）的信息
@@ -100,7 +111,18 @@ func New(repoPath string) (*GitWrapper, error) {
 }
 
 // InitRepo 初始化新的 Git 仓库
-func (g *GitWrapper) InitRepo() error {
+// InitRepo 在当前 path 下初始化一个新的 git 仓库。
+//
+// 参数 authorName / authorEmail 用于生成"初始提交"的作者信息：
+//   - 若两者均非空：创建一个空的 .gitignore 并生成初始提交，
+//     确保后续 branch/log 等操作能立即工作。
+//   - 若任一为空：仅执行 git init，不创建初始提交；这与
+//     `SaveVersion` 要求真实作者的策略保持一致（需求 4）。
+//     调用方随后设置好用户信息，再通过 SaveVersion 完成首次提交。
+//
+// 下游接口（Status / GetHistory / GetHEADCommit）已对
+// "仓库存在但无 commit" 的情况做了容错，无需 panic。
+func (g *GitWrapper) InitRepo(authorName, authorEmail string) error {
 	if g.repo != nil {
 		return nil // 已初始化
 	}
@@ -110,6 +132,11 @@ func (g *GitWrapper) InitRepo() error {
 		return fmt.Errorf("初始化仓库失败: %w", err)
 	}
 	g.repo = repo
+
+	// 若未提供真实用户身份，仅完成 git init，不生成初始 commit。
+	if strings.TrimSpace(authorName) == "" || strings.TrimSpace(authorEmail) == "" {
+		return nil
+	}
 
 	// 创建初始提交，确保 main 分支存在
 	wt, err := repo.Worktree()
@@ -127,8 +154,8 @@ func (g *GitWrapper) InitRepo() error {
 
 	_, err = wt.Commit("初始化文档仓库", &git.CommitOptions{
 		Author: &object.Signature{
-			Name:  "Git Agent",
-			Email: "agent@git-agent.dev",
+			Name:  authorName,
+			Email: authorEmail,
 			When:  time.Now(),
 		},
 	})
@@ -184,8 +211,16 @@ func (g *GitWrapper) SaveVersion(description string, files []string, authorName,
 		},
 	})
 	if err != nil {
-		if err.Error() == "no changes to commit" {
-			return "", fmt.Errorf("没有需要保存的修改")
+		// go-git 不同版本的 "空提交" 错误信息不一致：
+		//   - 旧版本: "no changes to commit"
+		//   - 新版本: "cannot create empty commit: clean working tree"
+		// 这里统一转换为 sentinel error 便于上层用 errors.Is 判断。
+		msg := err.Error()
+		if errors.Is(err, ErrNoChangesToCommit) ||
+			msg == "no changes to commit" ||
+			strings.Contains(msg, "clean working tree") ||
+			strings.Contains(msg, "empty commit") {
+			return "", fmt.Errorf("没有需要保存的修改: %w", ErrNoChangesToCommit)
 		}
 		return "", fmt.Errorf("保存版本失败: %w", err)
 	}
@@ -293,13 +328,13 @@ func (g *GitWrapper) GetHistory(filePath string, limit int, author string) ([]Ve
 		})
 		count++
 		if limit > 0 && count >= limit {
-			return fmt.Errorf("limit reached")
+			return errLimitReached
 		}
 		return nil
 	})
 
-	// "limit reached" 不是真正的错误，忽略
-	if err != nil && err.Error() != "limit reached" {
+	// errLimitReached 不是真正的错误，忽略
+	if err != nil && !errors.Is(err, errLimitReached) {
 		return nil, err
 	}
 
@@ -375,30 +410,70 @@ func (g *GitWrapper) RestoreFile(filePath, versionID string) error {
 		return fmt.Errorf("读取文件内容失败: %w", err)
 	}
 
+	// 读取完整 blob 内容（后续会根据模式决定是普通写入还是符号链接）
 	r, err := blob.Reader()
 	if err != nil {
 		return fmt.Errorf("读取文件内容失败: %w", err)
 	}
-	defer r.Close()
-
-	// 写入文件
-	f, err := wt.Filesystem.Create(filePath)
-	if err != nil {
-		return fmt.Errorf("创建文件失败: %w", err)
+	content, readErr := io.ReadAll(r)
+	_ = r.Close()
+	if readErr != nil {
+		return fmt.Errorf("读取文件内容失败: %w", readErr)
 	}
-	defer f.Close()
 
-	buf := make([]byte, 4096)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			if _, wErr := f.Write(buf[:n]); wErr != nil {
-				return fmt.Errorf("写入文件失败: %w", wErr)
-			}
+	// 原子写：先写临时文件，再 rename 覆盖目标文件；符号链接单独处理。
+	// 优先使用 g.path 拼出真实 OS 路径，以支持 os.Symlink / os.Chmod 等系统调用。
+	absTarget := filepath.Join(g.path, filePath)
+	targetDir := filepath.Dir(absTarget)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return fmt.Errorf("创建目录失败: %w", err)
+	}
+
+	// 符号链接：blob 内容即链接目标路径
+	if entry.Mode == filemode.Symlink {
+		// 移除已存在的目标（可能是文件或旧链接）
+		if err := os.Remove(absTarget); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("删除已有文件失败: %w", err)
 		}
-		if err != nil {
-			break
+		if err := os.Symlink(string(content), absTarget); err != nil {
+			return fmt.Errorf("创建符号链接失败: %w", err)
 		}
+		_, _ = wt.Add(filePath)
+		return nil
+	}
+
+	// 计算目标文件模式：可执行位保留
+	perm := os.FileMode(0o644)
+	if entry.Mode == filemode.Executable {
+		perm = 0o755
+	}
+
+	// 写临时文件，写完后 rename 原子替换
+	tmp, err := os.CreateTemp(targetDir, ".git-agent-restore-*")
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		_ = os.Remove(tmpPath)
+	}
+
+	if _, err := io.Copy(tmp, strings.NewReader(string(content))); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("写入文件失败: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("关闭临时文件失败: %w", err)
+	}
+	if err := os.Chmod(tmpPath, perm); err != nil {
+		cleanup()
+		return fmt.Errorf("设置文件权限失败: %w", err)
+	}
+	if err := os.Rename(tmpPath, absTarget); err != nil {
+		cleanup()
+		return fmt.Errorf("替换目标文件失败: %w", err)
 	}
 
 	_, _ = wt.Add(filePath)
@@ -426,29 +501,24 @@ func (g *GitWrapper) Status() (*StatusInfo, error) {
 	}
 
 	for file, s := range status {
-		change := FileChange{Path: file}
-
-		// 暂存区状态
+		// 暂存区状态：为每一条记录构造独立的 FileChange，避免与
+		// Unstaged 分支共享同一变量导致 status 字段互相覆盖（需求 17）。
 		switch s.Staging {
 		case git.Added:
-			change.Status = "added"
-			info.Staged = append(info.Staged, change)
+			info.Staged = append(info.Staged, FileChange{Path: file, Status: "added"})
 		case git.Modified:
-			change.Status = "modified"
-			info.Staged = append(info.Staged, change)
+			info.Staged = append(info.Staged, FileChange{Path: file, Status: "modified"})
 		case git.Deleted:
-			change.Status = "deleted"
-			info.Staged = append(info.Staged, change)
+			info.Staged = append(info.Staged, FileChange{Path: file, Status: "deleted"})
 		}
 
-		// 工作区状态
+		// 工作区状态：独立构造 FileChange，允许同一文件同时出现在
+		// Staged 与 Unstaged 里，各自反映真实状态。
 		switch s.Worktree {
 		case git.Modified:
-			change.Status = "modified"
-			info.Unstaged = append(info.Unstaged, change)
+			info.Unstaged = append(info.Unstaged, FileChange{Path: file, Status: "modified"})
 		case git.Deleted:
-			change.Status = "deleted"
-			info.Unstaged = append(info.Unstaged, change)
+			info.Unstaged = append(info.Unstaged, FileChange{Path: file, Status: "deleted"})
 		case git.Untracked:
 			info.Untracked = append(info.Untracked, file)
 		}
@@ -551,8 +621,8 @@ func (g *GitWrapper) Diff(filePath string) (string, error) {
 			}
 			result.WriteString(diffContent)
 
-		// 已删除的文件
-		case change.status == git.Deleted:
+		// 已删除的文件（工作区删除 或 暂存区删除）
+		case change.status == git.Deleted || change.staging == git.Deleted:
 			diffContent, err := g.diffDeletedFile(commitTree, change.path)
 			if err != nil {
 				result.WriteString(fmt.Sprintf("（无法读取已删除文件内容: %s）\n", err))
@@ -560,20 +630,24 @@ func (g *GitWrapper) Diff(filePath string) (string, error) {
 			}
 			result.WriteString(diffContent)
 
-		// 修改的文件：对比 HEAD 版本和工作区版本
-		case change.status == git.Modified || change.staging == git.Modified:
-			diffContent, err := g.diffModifiedFile(wt, commitTree, change.path)
-			if err != nil {
-				result.WriteString(fmt.Sprintf("（无法计算差异: %s）\n", err))
-				continue
-			}
-			result.WriteString(diffContent)
-
-		// 已暂存的新增文件
+		// 已暂存的新增文件（工作区已 Unmodified、Staging=Added）
 		case change.staging == git.Added:
 			diffContent, err := g.diffNewFile(wt, change.path)
 			if err != nil {
 				result.WriteString(fmt.Sprintf("（无法读取新文件内容: %s）\n", err))
+				continue
+			}
+			result.WriteString(diffContent)
+
+		// 修改的文件：对比 HEAD 版本和工作区版本
+		// 覆盖三种情况：
+		//   1) 仅工作区修改未暂存
+		//   2) 修改已暂存后工作区又叠加了新修改（Worktree=Modified & Staging=Modified）
+		//   3) 完整暂存（Worktree=Unmodified & Staging=Modified）—— 需求 1
+		case change.status == git.Modified || change.staging == git.Modified:
+			diffContent, err := g.diffModifiedFile(wt, commitTree, change.path)
+			if err != nil {
+				result.WriteString(fmt.Sprintf("（无法计算差异: %s）\n", err))
 				continue
 			}
 			result.WriteString(diffContent)
@@ -989,6 +1063,13 @@ func (g *GitWrapper) ListBranches() ([]BranchInfo, error) {
 
 // Merge 合并分支到当前分支
 // 等价于 git merge <branch>
+// Merge 将指定分支合并到当前分支。
+// 合并策略：
+//   - 若当前 HEAD 是目标分支的祖先：快进合并
+//   - 否则：3-way merge，冲突时返回冲突文件清单且不写入任何被冲突文件
+//
+// 需要通过 .git/config 中的 user.name / user.email 获取真实作者身份；
+// 未配置时返回明确的"用户信息未配置"错误。
 func (g *GitWrapper) Merge(branch string) error {
 	if err := g.ensureRepo(); err != nil {
 		return err
@@ -1023,7 +1104,7 @@ func (g *GitWrapper) Merge(branch string) error {
 	}
 
 	// 检查是否可以快进合并（当前 HEAD 是分支的祖先）
-	isAncestor, err := isAncestor(headCommit, branchCommit)
+	isFastForward, err := isAncestor(headCommit, branchCommit)
 	if err != nil {
 		return fmt.Errorf("检查合并关系失败: %w", err)
 	}
@@ -1033,7 +1114,7 @@ func (g *GitWrapper) Merge(branch string) error {
 		return fmt.Errorf("获取工作区失败: %w", err)
 	}
 
-	if isAncestor {
+	if isFastForward {
 		// 快进合并：直接将 HEAD 移动到目标分支
 		err = wt.Reset(&git.ResetOptions{
 			Commit: branchRef.Hash(),
@@ -1045,7 +1126,15 @@ func (g *GitWrapper) Merge(branch string) error {
 		return nil
 	}
 
-	// 非快进合并：执行三方合并
+	// 非快进合并：执行三方合并前，先校验用户身份
+	authorName, authorEmail, cfgErr := g.GetLocalUserConfig()
+	if cfgErr != nil {
+		return fmt.Errorf("读取用户配置失败: %w", cfgErr)
+	}
+	if strings.TrimSpace(authorName) == "" || strings.TrimSpace(authorEmail) == "" {
+		return errors.New("用户信息未配置：请先设置 user.name 与 user.email 后再执行合并")
+	}
+
 	// 找到两个分支的共同祖先
 	ancestor, err := headCommit.MergeBase(branchCommit)
 	if err != nil {
@@ -1071,70 +1160,85 @@ func (g *GitWrapper) Merge(branch string) error {
 		return fmt.Errorf("获取目标分支文件树失败: %w", err)
 	}
 
-	// 检测冲突：比较两个分支相对于共同祖先的修改
+	// 检测冲突：edit_edit / edit_delete / add_add
 	conflicts, err := detectMergeConflicts(ancestorTree, headTree, branchTree)
 	if err != nil {
 		return fmt.Errorf("检测合并冲突失败: %w", err)
 	}
 
 	if len(conflicts) > 0 {
-		// 有冲突，报告冲突文件
-		var conflictFiles []string
+		// 冲突时不写入任何文件，直接把冲突清单返回给上层
+		var lines []string
 		for _, c := range conflicts {
-			conflictFiles = append(conflictFiles, c)
+			lines = append(lines, fmt.Sprintf("%s [%s]", c.Path, c.Kind))
 		}
-		return fmt.Errorf("合并冲突：以下文件存在冲突，请先解决：\n%s", strings.Join(conflictFiles, "\n"))
+		return fmt.Errorf("合并冲突：以下文件存在冲突，请先解决：\n%s", strings.Join(lines, "\n"))
 	}
 
-	// 无冲突，将分支的修改应用到工作区
-	changes, err := object.DiffTree(ancestorTree, branchTree)
+	// 无冲突：以"我方 tree 为基础"应用对方 vs 祖先 的差异；
+	// 相同路径两侧都改（但哈希一致，被 detectMergeConflicts 放行）时，直接沿用对方版本。
+	branchChanges, err := object.DiffTree(ancestorTree, branchTree)
 	if err != nil {
 		return fmt.Errorf("计算差异失败: %w", err)
 	}
 
-	patch, err := changes.Patch()
-	if err != nil {
-		return fmt.Errorf("生成补丁失败: %w", err)
-	}
-
-	// 应用修改到工作区
-	for _, filePatch := range patch.FilePatches() {
-		if filePatch.IsBinary() {
-			continue
+	for _, ch := range branchChanges {
+		action, err := ch.Action()
+		if err != nil {
+			return fmt.Errorf("解析变更失败: %w", err)
 		}
 
-		from, to := filePatch.Files()
-		if to != nil {
-			// 文件被修改或新增
-			var content strings.Builder
-			for _, chunk := range filePatch.Chunks() {
-				opType := chunk.Type()
-				if opType == fdiff.Add || opType == fdiff.Equal {
-					content.WriteString(chunk.Content())
-				}
+		switch action {
+		case merkletrie.Delete:
+			// 对方删除了这个文件
+			if ch.From.Name != "" {
+				_ = wt.Filesystem.Remove(ch.From.Name)
+				_, _ = wt.Add(ch.From.Name)
 			}
-			path := to.Path()
+		case merkletrie.Insert, merkletrie.Modify:
+			// 对方新增或修改：直接把对方版本的 blob 内容写回工作区
+			path := ch.To.Name
+			if path == "" {
+				continue
+			}
+			blob, err := g.repo.BlobObject(ch.To.TreeEntry.Hash)
+			if err != nil {
+				return fmt.Errorf("读取对方文件 %s 失败: %w", path, err)
+			}
+			rc, err := blob.Reader()
+			if err != nil {
+				return fmt.Errorf("打开对方文件 %s 失败: %w", path, err)
+			}
+
+			// 保证父目录存在
+			if dir := filepath.Dir(path); dir != "." && dir != "" {
+				_ = wt.Filesystem.MkdirAll(dir, 0o755)
+			}
+
 			f, err := wt.Filesystem.Create(path)
 			if err != nil {
+				rc.Close()
 				return fmt.Errorf("创建文件 %s 失败: %w", path, err)
 			}
-			_, err = f.Write([]byte(content.String()))
-			f.Close()
-			if err != nil {
+			if _, err := io.Copy(f, rc); err != nil {
+				rc.Close()
+				f.Close()
 				return fmt.Errorf("写入文件 %s 失败: %w", path, err)
 			}
-			_, _ = wt.Add(path)
-		} else if from != nil && to == nil {
-			// 文件被删除
-			_ = wt.Filesystem.Remove(from.Path())
+			rc.Close()
+			f.Close()
+
+			if _, err := wt.Add(path); err != nil {
+				return fmt.Errorf("暂存文件 %s 失败: %w", path, err)
+			}
 		}
 	}
 
-	// 创建合并提交
+	// 创建合并提交，作者使用真实用户身份
 	_, err = wt.Commit(fmt.Sprintf("合并分支 %s", branch), &git.CommitOptions{
 		Author: &object.Signature{
-			Name:  "Git Agent",
-			Email: "agent@git-agent.dev",
+			Name:  authorName,
+			Email: authorEmail,
 			When:  time.Now(),
 		},
 		Parents: []plumbing.Hash{head.Hash(), branchRef.Hash()},
@@ -1146,32 +1250,80 @@ func (g *GitWrapper) Merge(branch string) error {
 	return nil
 }
 
-// isAncestor 检查 ancestor 是否是 descendant 的祖先
+// isAncestor 检查 ancestor 是否是 descendant 的祖先。
+// 使用迭代 BFS + visited 集合避免递归栈溢出以及在多父提交(merge commit)时的指数级重复访问。
 func isAncestor(ancestor, descendant *object.Commit) (bool, error) {
-	iter := descendant.Parents()
-	for {
-		parent, err := iter.Next()
-		if err != nil {
-			break
+	if ancestor == nil || descendant == nil {
+		return false, nil
+	}
+	if ancestor.Hash == descendant.Hash {
+		return true, nil
+	}
+
+	visited := make(map[plumbing.Hash]struct{})
+	queue := []*object.Commit{descendant}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		if _, ok := visited[cur.Hash]; ok {
+			continue
 		}
-		if parent.Hash == ancestor.Hash {
-			return true, nil
-		}
-		// 递归检查
-		found, err := isAncestor(ancestor, parent)
-		if err != nil {
-			return false, err
-		}
-		if found {
-			return true, nil
+		visited[cur.Hash] = struct{}{}
+
+		iter := cur.Parents()
+		for {
+			parent, err := iter.Next()
+			if err != nil {
+				// 迭代器耗尽（io.EOF）或读取失败：结束当前节点父列表遍历
+				break
+			}
+			if parent.Hash == ancestor.Hash {
+				return true, nil
+			}
+			if _, ok := visited[parent.Hash]; !ok {
+				queue = append(queue, parent)
+			}
 		}
 	}
 	return false, nil
 }
 
 // detectMergeConflicts 检测两个分支相对于共同祖先的修改是否有冲突
-func detectMergeConflicts(ancestorTree, ourTree, theirTree *object.Tree) ([]string, error) {
-	// 获取我们和对方各自的修改
+// MergeConflictKind 描述合并冲突的具体类型
+type MergeConflictKind string
+
+const (
+	MergeConflictEditEdit   MergeConflictKind = "edit_edit"
+	MergeConflictEditDelete MergeConflictKind = "edit_delete"
+	MergeConflictAddAdd     MergeConflictKind = "add_add"
+)
+
+// MergeConflictItem 一条合并冲突记录
+type MergeConflictItem struct {
+	Path string
+	Kind MergeConflictKind
+}
+
+// changeAction 从 object.Change 提取动作与路径
+func changeAction(c *object.Change) (action merkletrie.Action, name string, ok bool) {
+	a, err := c.Action()
+	if err != nil {
+		return 0, "", false
+	}
+	name = c.To.Name
+	if name == "" {
+		name = c.From.Name
+	}
+	return a, name, name != ""
+}
+
+// detectMergeConflicts 基于共同祖先与两侧 tree，检测三类合并冲突：
+//   - edit_edit：双方修改了同一文件（不做行级 3-way，直接标记冲突）
+//   - edit_delete：一方修改，另一方删除同一文件
+//   - add_add：双方都新增了同名文件（且内容不同）
+func detectMergeConflicts(ancestorTree, ourTree, theirTree *object.Tree) ([]MergeConflictItem, error) {
 	ourChanges, err := object.DiffTree(ancestorTree, ourTree)
 	if err != nil {
 		return nil, err
@@ -1181,38 +1333,68 @@ func detectMergeConflicts(ancestorTree, ourTree, theirTree *object.Tree) ([]stri
 		return nil, err
 	}
 
-	// 构建我们修改过的文件集合
-	ourModifiedFiles := make(map[string]bool)
-	for _, change := range ourChanges {
-		action, err := change.Action()
-		if err != nil {
-			continue
+	type sideChange struct {
+		action merkletrie.Action
+		change *object.Change
+	}
+
+	ourMap := make(map[string]sideChange)
+	for _, c := range ourChanges {
+		if a, name, ok := changeAction(c); ok {
+			ourMap[name] = sideChange{action: a, change: c}
 		}
-		if action == merkletrie.Modify || action == merkletrie.Insert {
-			name := change.To.Name
-			if name == "" {
-				name = change.From.Name
-			}
-			if name != "" {
-				ourModifiedFiles[name] = true
-			}
+	}
+	theirMap := make(map[string]sideChange)
+	for _, c := range theirChanges {
+		if a, name, ok := changeAction(c); ok {
+			theirMap[name] = sideChange{action: a, change: c}
 		}
 	}
 
-	// 检查对方的修改是否与我们的修改有冲突（同一文件双方都修改了）
-	var conflicts []string
-	for _, change := range theirChanges {
-		action, err := change.Action()
-		if err != nil {
-			continue
+	var conflicts []MergeConflictItem
+	seen := make(map[string]struct{})
+	addConflict := func(path string, kind MergeConflictKind) {
+		if _, ok := seen[path]; ok {
+			return
 		}
-		if action == merkletrie.Modify || action == merkletrie.Insert {
-			name := change.To.Name
-			if name == "" {
-				name = change.From.Name
+		seen[path] = struct{}{}
+		conflicts = append(conflicts, MergeConflictItem{Path: path, Kind: kind})
+	}
+
+	// 以 union(ourMap, theirMap) 作为遍历键
+	names := make(map[string]struct{}, len(ourMap)+len(theirMap))
+	for k := range ourMap {
+		names[k] = struct{}{}
+	}
+	for k := range theirMap {
+		names[k] = struct{}{}
+	}
+
+	for name := range names {
+		ours, weTouched := ourMap[name]
+		theirs, theyTouched := theirMap[name]
+		if !weTouched || !theyTouched {
+			continue // 只有一方动过，无冲突
+		}
+
+		// 判断哈希是否相同：相同则不算冲突
+		ourHash := ours.change.To.TreeEntry.Hash
+		theirHash := theirs.change.To.TreeEntry.Hash
+
+		switch {
+		case ours.action == merkletrie.Delete && theirs.action == merkletrie.Delete:
+			// 双方都删除，不冲突
+		case ours.action == merkletrie.Delete && theirs.action == merkletrie.Modify:
+			addConflict(name, MergeConflictEditDelete)
+		case ours.action == merkletrie.Modify && theirs.action == merkletrie.Delete:
+			addConflict(name, MergeConflictEditDelete)
+		case ours.action == merkletrie.Insert && theirs.action == merkletrie.Insert:
+			if ourHash != theirHash {
+				addConflict(name, MergeConflictAddAdd)
 			}
-			if name != "" && ourModifiedFiles[name] {
-				conflicts = append(conflicts, name)
+		case ours.action == merkletrie.Modify && theirs.action == merkletrie.Modify:
+			if ourHash != theirHash {
+				addConflict(name, MergeConflictEditEdit)
 			}
 		}
 	}
@@ -1885,12 +2067,12 @@ func (g *GitWrapper) GetAheadBehind() (*AheadBehind, error) {
 		}
 		err = iter.ForEach(func(c *object.Commit) error {
 			if c.Hash == mergeBaseHash {
-				return fmt.Errorf("stop")
+				return errIterStop
 			}
 			ahead++
 			return nil
 		})
-		if err != nil && err.Error() != "stop" {
+		if err != nil && !errors.Is(err, errIterStop) {
 			return nil, err
 		}
 	}
@@ -1906,12 +2088,12 @@ func (g *GitWrapper) GetAheadBehind() (*AheadBehind, error) {
 		}
 		err = iter.ForEach(func(c *object.Commit) error {
 			if c.Hash == mergeBaseHash {
-				return fmt.Errorf("stop")
+				return errIterStop
 			}
 			behind++
 			return nil
 		})
-		if err != nil && err.Error() != "stop" {
+		if err != nil && !errors.Is(err, errIterStop) {
 			return nil, err
 		}
 	}

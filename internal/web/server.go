@@ -19,8 +19,10 @@ type Options struct {
 	Port int    // 监听端口，默认 8088
 	Open bool   // 启动后是否自动打开浏览器
 	// AllowLAN 允许非 127.0.0.1 监听（配合 Host=0.0.0.0 使用）。
-	// 当为 true 且 Host 非 localhost 时，会启用 Token 鉴权（后续任务实现）。
+	// 当为 true 且 Host 非 localhost 时，会启用 Token 鉴权。
 	AllowLAN bool
+	// Token 为一次性/单会话令牌；空字符串时，若 AllowLAN=true 会在 NewServer 里自动生成并写回。
+	Token string
 }
 
 // DefaultOptions 返回默认选项。
@@ -57,6 +59,12 @@ func NewServer(opts Options, manager *Manager) *Server {
 	if opts.Port == 0 {
 		opts.Port = 8088
 	}
+	// AllowLAN 下强制启用 Token；若未提供则自动生成。
+	if opts.AllowLAN && opts.Token == "" {
+		if tok, err := GenerateToken(); err == nil {
+			opts.Token = tok
+		}
+	}
 	s := &Server{
 		opts:       opts,
 		mux:        http.NewServeMux(),
@@ -65,6 +73,24 @@ func NewServer(opts Options, manager *Manager) *Server {
 	}
 	s.registerRoutes()
 	return s
+}
+
+// Token 返回当前使用的鉴权 Token（可能为空），供 serve.go 启动时打印。
+func (s *Server) Token() string { return s.opts.Token }
+
+// buildHandler 构造最终 http.Handler：mux + authMiddleware。
+// 本机模式（Host=127.0.0.1/localhost）默认只做 Host 校验；
+// AllowLAN 时强制 Token 鉴权。
+func (s *Server) buildHandler() http.Handler {
+	cfg := AuthConfig{
+		Token:    s.opts.Token,
+		AllowLAN: s.opts.AllowLAN,
+	}
+	if !s.opts.AllowLAN {
+		// 本机模式：限制 Host header，防御 DNS Rebinding
+		cfg.AllowedHosts = []string{"127.0.0.1", "localhost", "::1"}
+	}
+	return authMiddleware(cfg, s.mux)
 }
 
 // Workspaces 返回 Workspace 管理器。
@@ -220,7 +246,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 
 	s.server = &http.Server{
-		Handler:           s.mux,
+		Handler:           s.buildHandler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -44,6 +45,12 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 安全：拒绝进入系统保留目录及其子路径，避免通过目录选择器窥探/操作敏感位置。
+	if err := ensureBrowseAllowed(absPath); err != nil {
+		writeError(w, http.StatusForbidden, "path_denied", err.Error())
+		return
+	}
+
 	// 检查路径是否存在
 	info, err := os.Stat(absPath)
 	if err != nil {
@@ -67,12 +74,12 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	const maxEntries = 200
 	dirs := make([]BrowseDirEntry, 0)
 	for _, e := range entries {
-		// 只返回目录，跳过隐藏目录（以 . 开头）
+		// 只返回目录，跳过隐藏目录（以 . 开头）与 .git
 		if !e.IsDir() {
 			continue
 		}
 		name := e.Name()
-		if strings.HasPrefix(name, ".") {
+		if strings.HasPrefix(name, ".") || name == ".git" {
 			continue
 		}
 		if len(dirs) >= maxEntries {
@@ -122,4 +129,32 @@ func listRoots() []BrowseDirEntry {
 	return []BrowseDirEntry{
 		{Name: "/", Path: "/"},
 	}
+}
+
+// ensureBrowseAllowed 拒绝浏览系统保留目录本身及其内部；
+// 允许浏览到保留目录之外的所有位置。仅目录选择器使用。
+func ensureBrowseAllowed(abs string) error {
+	clean := filepath.Clean(abs)
+	// 明确拒绝 .git 内部窥探
+	if strings.Contains(filepath.ToSlash(clean), "/.git/") ||
+		strings.HasSuffix(filepath.ToSlash(clean), "/.git") ||
+		filepath.Base(clean) == ".git" {
+		return fmt.Errorf("拒绝浏览 .git 内部目录")
+	}
+	for _, r := range reservedDirs() {
+		rc := filepath.Clean(r)
+		// 保留目录本身：拒绝
+		if strings.EqualFold(clean, rc) {
+			return fmt.Errorf("系统保留目录不允许浏览: %s", clean)
+		}
+		// 保留目录的子路径：也拒绝，避免通过 /etc/xxx 探测配置
+		sep := string(filepath.Separator)
+		if !strings.HasSuffix(rc, sep) {
+			rc += sep
+		}
+		if strings.HasPrefix(clean, rc) {
+			return fmt.Errorf("系统保留目录不允许浏览: %s", clean)
+		}
+	}
+	return nil
 }

@@ -76,9 +76,13 @@ func runServe(args []string) error {
 			case <-srv.Ready():
 				// 延迟一点点，确保 Serve() 已真正开始接受连接
 				time.Sleep(200 * time.Millisecond)
-				if err := web.OpenBrowser(srv.URL()); err != nil {
+				openURL := srv.URL()
+				if opts.AllowLAN && srv.Token() != "" {
+					openURL = fmt.Sprintf("%s/?token=%s", srv.URL(), srv.Token())
+				}
+				if err := web.OpenBrowser(openURL); err != nil {
 					fmt.Printf("  %s提示：自动打开浏览器失败（%v），请手动访问 %s%s\n",
-						colorGray, err, srv.URL(), colorReset)
+						colorGray, err, openURL, colorReset)
 				}
 			case <-ctx.Done():
 				return
@@ -86,7 +90,7 @@ func runServe(args []string) error {
 		}()
 	}
 
-	printServeBanner(srv.URL())
+	printServeBanner(srv.URL(), srv.Token(), opts.AllowLAN)
 
 	if err := srv.Serve(ctx); err != nil {
 		return err
@@ -96,9 +100,17 @@ func runServe(args []string) error {
 }
 
 // printServeBanner 打印 serve 启动横幅。
-func printServeBanner(url string) {
+func printServeBanner(url, token string, allowLAN bool) {
 	fmt.Printf("\n%s%sGit Agent Web%s\n", styleBold, colorCyan, colorReset)
-	fmt.Printf("  %s🌐 %s%s\n", styleInfo, url, colorReset)
+	if allowLAN && token != "" {
+		// LAN 模式：将 Token 拼接到 URL 注量到剪贴板友好的链接
+		fullURL := fmt.Sprintf("%s/?token=%s", url, token)
+		fmt.Printf("  %s🌐 %s%s\n", styleInfo, fullURL, colorReset)
+		fmt.Printf("  %s🔐 鉴权 Token：%s%s\n", styleInfo, token, colorReset)
+		fmt.Printf("  %s❗️ LAN 模式已开启，请将链接仅分享给可信任的使用者%s\n", colorGray, colorReset)
+	} else {
+		fmt.Printf("  %s🌐 %s%s\n", styleInfo, url, colorReset)
+	}
 	fmt.Printf("  %s按 Ctrl+C 退出%s\n\n", colorGray, colorReset)
 }
 

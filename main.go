@@ -267,6 +267,8 @@ func printResponse(resp *agent.AgentResponse) {
 }
 
 // handleModeSwitch 处理模式切换
+// 需求 19：/mode local 与 /mode llm 需要真正切换 a.llmConfig.Enabled，
+// 而不仅仅是打印提示；Process 会立即按新模式分流。
 func handleModeSwitch(a *agent.Agent, input string) {
 	parts := strings.Fields(input)
 	if len(parts) < 2 {
@@ -274,17 +276,35 @@ func handleModeSwitch(a *agent.Agent, input string) {
 		return
 	}
 
+	if a == nil {
+		fmt.Printf("  %sAgent 未初始化%s\n", styleError, colorReset)
+		return
+	}
+
 	mode := parts[1]
 	switch mode {
 	case "local":
+		if !a.IsLLMEnabled() {
+			fmt.Printf("  %s当前已是本地模式%s\n", styleInfo, colorReset)
+			return
+		}
+		if err := a.SetLLMEnabled(false); err != nil {
+			fmt.Printf("  %s切换失败：%v%s\n", styleError, err, colorReset)
+			return
+		}
 		fmt.Printf("  %s已切换到本地模式%s\n", styleWarn, colorReset)
 	case "llm":
-		if a != nil && a.IsLLMEnabled() {
+		if a.IsLLMEnabled() {
 			fmt.Printf("  %s当前已是 LLM 模式%s\n", styleInfo, colorReset)
-		} else {
+			return
+		}
+		if err := a.SetLLMEnabled(true); err != nil {
+			// 未初始化 LLM 时，切换失败并保留原状态。
 			fmt.Printf("  %sLLM 未配置%s\n", styleWarn, colorReset)
 			fmt.Printf("  %sgit-agent --api-key YOUR_KEY --base-url YOUR_URL --model MODEL_NAME%s\n", colorGray, colorReset)
+			return
 		}
+		fmt.Printf("  %s已切换到 LLM 模式%s\n", styleInfo, colorReset)
 	default:
 		fmt.Printf("  %s未知模式：%s%s（可选：local, llm）\n", styleError, mode, colorReset)
 	}

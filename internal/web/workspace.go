@@ -195,18 +195,21 @@ func (m *Manager) List() []WorkspaceInfo {
 
 // ReloadLLMConfig 热更新所有已打开 workspace 的 Agent LLM 配置。
 // 当用户在设置页保存 LLM 配置后调用，使配置变更立即生效。
+//
+// 与旧实现的差异：
+//   - 全程持写锁修改 ws.Agent / ws.UserConfig / ws.LLMConfig，避免 SSE 请求
+//     持有旧 *Agent 指针后被中途替换，读到半初始化状态。
+//   - 新 Agent 迁移旧 Agent 的 chatHistory 与 event hook，保证会话不丢、
+//     已建立的 SSE 连接可继续观察后续事件。
+//   - 旧 Agent 通过 goroutine 异步 Close，避免在写锁内做重量清理。
 func (m *Manager) ReloadLLMConfig(userCfg *agent.UserConfig, llmCfg *agent.LLMConfig) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.defaultUser = userCfg
 	m.defaultLLM = llmCfg
-	// 收集需要重建的 workspace
-	toRebuild := make([]*Workspace, 0, len(m.items))
-	for _, ws := range m.items {
-		toRebuild = append(toRebuild, ws)
-	}
-	m.mu.Unlock()
 
-	for _, ws := range toRebuild {
+	for _, ws := range m.items {
 		newUserCfg := cloneUserConfig(userCfg)
 		newLLMCfg := cloneLLMConfig(llmCfg)
 
@@ -223,13 +226,28 @@ func (m *Manager) ReloadLLMConfig(userCfg *agent.UserConfig, llmCfg *agent.LLMCo
 		}
 		newAgent.LoadLocalUserConfig()
 
-		// 替换旧 Agent
+		// 迁移旧 Agent 的 chatHistory：保留用户已有的对话上下文。
+		// 注意：LLM 开关翻转（本地 <-> LLM 模式）时也保留历史，让用户可以延续话题；
+		// 若用户希望重置，使用 /clear 或界面上的清空会话即可。
+		if oldAgent := ws.Agent; oldAgent != nil {
+			if hist := oldAgent.SnapshotChatHistory(); len(hist) > 0 {
+				newAgent.LoadChatHistory(hist)
+			}
+			// 迁移 SSE 事件钩子，让已建立的流式连接继续收到新 Agent 的事件。
+			newAgent.TransferEventHook(oldAgent)
+		}
+
 		oldAgent := ws.Agent
 		ws.Agent = newAgent
 		ws.UserConfig = newUserCfg
 		ws.LLMConfig = newLLMCfg
+
+		// 广播一次 state_changed，前端可据此提示"配置已热更新"。
+		newAgent.EmitStateChanged(agent.StateIdle, "reload")
+
+		// 异步回收旧 Agent，避免在管理器写锁下做阻塞清理。
 		if oldAgent != nil {
-			oldAgent.Close()
+			go oldAgent.Close()
 		}
 		fmt.Printf("[web] workspace %s 的 Agent 已热更新 (LLM=%v)\n", ws.Path, newLLMCfg != nil && newLLMCfg.Enabled)
 	}

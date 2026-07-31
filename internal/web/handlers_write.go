@@ -40,7 +40,15 @@ func (s *Server) handleInitRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := gw.InitRepo(); err != nil {
+	// 读取用户信息：有配置才会创建初始 commit，否则仅 git init
+	uc := ws.Agent.GetUserConfig()
+	var authorName, authorEmail string
+	if uc != nil {
+		authorName = uc.Name
+		authorEmail = uc.Email
+	}
+
+	if err := gw.InitRepo(authorName, authorEmail); err != nil {
 		s.audit.Log("init", ws, false, nil, err)
 		writeError(w, http.StatusInternalServerError, "init_failed", err.Error())
 		return
@@ -53,9 +61,7 @@ func (s *Server) handleInitRepo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 如果没配置用户信息，提示一下
-	missingUser := ws.Agent.GetUserConfig() == nil ||
-		ws.Agent.GetUserConfig().Name == "" ||
-		ws.Agent.GetUserConfig().Email == ""
+	missingUser := authorName == "" || authorEmail == ""
 
 	s.audit.Log("init", ws, true, map[string]interface{}{
 		"gitignore": true,
